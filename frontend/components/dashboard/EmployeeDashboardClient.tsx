@@ -31,7 +31,7 @@ export function EmployeeDashboardClient() {
     setError("");
     try {
       const [{ data: ticketData }, { data: assetData }, { data: notificationData }] = await Promise.all([
-        api.get<{ data: any[] }>("/tickets"),
+        api.get<{ data: any[] }>(`/tickets?requesterId=${user?.id ?? ""}`),
         api.get<{ data: Asset[] }>("/assets"),
         api.get<{ data: Notification[] }>("/notifications")
       ]);
@@ -50,9 +50,8 @@ export function EmployeeDashboardClient() {
   }, []);
 
   const mine = useMemo(() => {
-    const loginId = user?.email?.toLowerCase();
-    return tickets.filter((ticket) => !loginId || ticket.requesterId?.toLowerCase() === loginId);
-  }, [tickets, user?.email]);
+    return tickets.filter((ticket) => !user?.id || ticket.requesterUserId === user.id);
+  }, [tickets, user?.id]);
 
   const assignedAssets = useMemo(() => {
     const loginId = user?.email?.toLowerCase();

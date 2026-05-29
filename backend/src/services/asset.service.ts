@@ -51,9 +51,14 @@ async function getUserColumns(connection: any) {
   );
   const columns = new Set(((result.rows || []) as Array<{ COLUMN_NAME: string }>).map((row) => row.COLUMN_NAME));
   return {
+    columns,
     usernameColumn: columns.has("USERNAME") ? "username" : columns.has("EMAIL") ? "email" : "login_id",
     nameExpression: columns.has("FULL_NAME") ? "full_name" : columns.has("NAME") ? "name" : columns.has("USERNAME") ? "username" : columns.has("EMAIL") ? "email" : "login_id"
   };
+}
+
+function userColumnSelect(columns: Set<string>, alias: string, column: string, fallback = "NULL") {
+  return columns.has(column.toUpperCase()) ? `${alias}.${column}` : fallback;
 }
 
 function statusFromLifecycle(value?: string) {
@@ -334,16 +339,21 @@ export async function listAssetRequests() {
     const assetColumn = columns.has("ASSET_TYPE") ? "asset_type" : "asset_name";
     const justificationSelect = columns.has("JUSTIFICATION") ? "ar.justification" : "NULL AS justification";
     const approvedByJoin = columns.has("APPROVED_BY") ? `LEFT JOIN users approver ON approver.id = ar.approved_by` : "";
-    const decidedBySelect = columns.has("APPROVED_BY") ? `approver.${userColumns.usernameColumn}` : "NULL";
+    const approvedByNameSelect = columns.has("APPROVED_BY") ? `approver.${userColumns.nameExpression}` : "NULL";
+    const approvedByLoginSelect = columns.has("APPROVED_BY") ? `approver.${userColumns.usernameColumn}` : "NULL";
     const result = await connection.execute(
       `SELECT ar.id, ar.${requesterColumn} AS requester_id,
               requester.${userColumns.nameExpression} AS requester_name,
               requester.${userColumns.usernameColumn} AS requester_login,
+              ${userColumnSelect(userColumns.columns, "requester", "employee_id", "TO_CHAR(requester.id)")} AS requester_employee_id,
+              ${userColumnSelect(userColumns.columns, "requester", "role", "'employee'")} AS requester_role,
+              ${userColumnSelect(userColumns.columns, "requester", "department")} AS requester_department,
               ar.${assetColumn} AS asset_type,
               ${justificationSelect},
               ar.status,
               ar.created_at,
-              ${decidedBySelect} AS decided_by_login
+              ${approvedByNameSelect} AS approved_by_name,
+              ${approvedByLoginSelect} AS decided_by_login
        FROM asset_requests ar
        LEFT JOIN users requester ON requester.id = ar.${requesterColumn}
        ${approvedByJoin}
@@ -354,10 +364,17 @@ export async function listAssetRequests() {
       requesterId: row.REQUESTER_ID,
       requesterName: row.REQUESTER_NAME || "Unknown",
       requesterLogin: row.REQUESTER_LOGIN || "",
+      requesterFullName: row.REQUESTER_NAME || row.REQUESTER_LOGIN || "Unknown",
+      requesterEmployeeId: row.REQUESTER_EMPLOYEE_ID || String(row.REQUESTER_ID || ""),
+      requesterRole: row.REQUESTER_ROLE || "employee",
+      requesterDepartment: row.REQUESTER_DEPARTMENT || "Unassigned",
+      department: row.REQUESTER_DEPARTMENT || "Unassigned",
       assetType: row.ASSET_TYPE || "Asset",
-      justification: row.JUSTIFICATION || "",
+      justification: row.JUSTIFICATION || "No justification provided.",
       status: row.STATUS || "pending",
+      requestedAt: row.CREATED_AT,
       createdAt: row.CREATED_AT,
+      approvedBy: row.APPROVED_BY_NAME || row.DECIDED_BY_LOGIN || "",
       decidedByLogin: row.DECIDED_BY_LOGIN || ""
     }));
   } catch (error) {
@@ -404,11 +421,33 @@ export async function decideAssetRequest(input: { id: number; status: "approved"
   try {
     const requestTable = await connection.execute(`SELECT column_name FROM user_tab_columns WHERE table_name = 'ASSET_REQUESTS'`);
     const columns = new Set(((requestTable.rows || []) as Array<{ COLUMN_NAME: string }>).map((row) => row.COLUMN_NAME));
+    let request: { REQUESTER_ID?: number; ASSET_TYPE?: string } | undefined;
     if (columns.size) {
+      const requesterColumn = columns.has("REQUESTER_ID") ? "requester_id" : "employee_id";
+      const assetColumn = columns.has("ASSET_TYPE") ? "asset_type" : "asset_name";
+      const requestResult = await connection.execute(
+        `SELECT ar.${requesterColumn} AS requester_id, ar.${assetColumn} AS asset_type
+         FROM asset_requests ar
+         WHERE ar.id = :id`,
+        { id: input.id }
+      );
+      request = (requestResult.rows || [])[0] as { REQUESTER_ID?: number; ASSET_TYPE?: string } | undefined;
       const updates = ["status = :status"];
-      if (columns.has("APPROVED_BY")) updates.push("approved_by = :actorId");
+      const binds: Record<string, unknown> = { id: input.id, status: input.status };
+      if (columns.has("APPROVED_BY")) {
+        updates.push("approved_by = :actorId");
+        binds.actorId = input.actorId;
+      }
       if (columns.has("UPDATED_AT")) updates.push("updated_at = CURRENT_TIMESTAMP");
-      await connection.execute(`UPDATE asset_requests SET ${updates.join(", ")} WHERE id = :id`, input);
+      await connection.execute(`UPDATE asset_requests SET ${updates.join(", ")} WHERE id = :id`, binds);
+    }
+    if (request?.REQUESTER_ID) {
+      const label = input.status === "approved" ? "approved" : "rejected";
+      await createNotification({
+        userId: Number(request.REQUESTER_ID),
+        title: `Asset request ${label}`,
+        body: `Your ${request.ASSET_TYPE || "asset"} request was ${label}.`
+      }, connection);
     }
     await writeAuditLog({ userId: input.actorId, action: `asset_request_${input.status}`, details: `Request #${input.id} ${input.status}.` }, connection);
     await connection.commit();

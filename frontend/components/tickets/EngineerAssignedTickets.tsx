@@ -23,7 +23,7 @@ export function EngineerAssignedTickets() {
     setLoading(true);
     setError("");
     try {
-      const { data } = await api.get<{ data: any[] }>("/tickets");
+      const { data } = await api.get<{ data: any[] }>(`/tickets?assignedTo=${engineer?.id ?? ""}`);
       setTickets(data.data.map(normalizeTicket));
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Could not load assigned tickets.");
@@ -37,13 +37,12 @@ export function EngineerAssignedTickets() {
   }, []);
 
   const assigned = useMemo(() => {
-    const loginId = engineer?.email?.toLowerCase();
     return tickets.filter((ticket) => {
-      const belongsToEngineer = loginId ? ticket.assignedToId?.toLowerCase() === loginId : Boolean(ticket.assignedToId);
+      const belongsToEngineer = engineer?.id ? ticket.assignedToUserId === engineer.id : Boolean(ticket.assignedToUserId);
       const haystack = `${ticket.id} ${ticket.title} ${ticket.category} ${ticket.requesterName}`.toLowerCase();
       return belongsToEngineer && (status === "all" || ticket.status === status) && haystack.includes(search.toLowerCase());
     });
-  }, [engineer?.email, search, status, tickets]);
+  }, [engineer?.id, search, status, tickets]);
 
   return (
     <section className="rounded-lg border border-slate-200 bg-white shadow-sm">

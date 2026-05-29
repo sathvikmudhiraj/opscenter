@@ -6,6 +6,8 @@ import { createNotification, notifyAdmins } from "./notification.service";
 type TicketColumns = {
   columns: Set<string>;
   requesterColumn: "requester_id" | "created_by";
+  hasRequesterId: boolean;
+  hasCreatedBy: boolean;
   hasAssignedTo: boolean;
   hasUpdatedAt: boolean;
   hasAssetId: boolean;
@@ -17,6 +19,7 @@ export type TicketFilters = {
   priority?: string;
   category?: string;
   assignedTo?: string;
+  requesterId?: string;
 };
 
 async function getTicketColumns(connection: any): Promise<TicketColumns> {
@@ -27,6 +30,8 @@ async function getTicketColumns(connection: any): Promise<TicketColumns> {
   return {
     columns,
     requesterColumn: columns.has("REQUESTER_ID") ? "requester_id" : "created_by",
+    hasRequesterId: columns.has("REQUESTER_ID"),
+    hasCreatedBy: columns.has("CREATED_BY"),
     hasAssignedTo: columns.has("ASSIGNED_TO"),
     hasUpdatedAt: columns.has("UPDATED_AT"),
     hasAssetId: columns.has("ASSET_ID")
@@ -39,8 +44,9 @@ async function getUserColumns(connection: any) {
   );
   const columns = new Set(((result.rows || []) as Array<{ COLUMN_NAME: string }>).map((row) => row.COLUMN_NAME));
   const usernameColumn = columns.has("USERNAME") ? "username" : columns.has("EMAIL") ? "email" : "login_id";
-  const nameExpression = columns.has("NAME") ? "name" : usernameColumn;
-  return { usernameColumn, nameExpression };
+  const nameExpression = columns.has("FULL_NAME") ? "full_name" : columns.has("NAME") ? "name" : usernameColumn;
+  const employeeIdExpression = columns.has("EMPLOYEE_ID") ? "employee_id" : "NULL";
+  return { usernameColumn, nameExpression, employeeIdExpression };
 }
 
 async function getTicketUpdateColumns(connection: any) {
@@ -141,6 +147,20 @@ function buildTicketFilters(input: TicketFilters, ticketColumns: TicketColumns, 
     }
   }
 
+  if (input.requesterId && input.requesterId !== "all") {
+    if (/^\d+$/.test(input.requesterId)) {
+      binds.requesterId = Number(input.requesterId);
+      const requesterConditions: string[] = [];
+      if (ticketColumns.hasRequesterId) requesterConditions.push("t.requester_id = :requesterId");
+      if (ticketColumns.hasCreatedBy) requesterConditions.push("t.created_by = :requesterId");
+      if (!requesterConditions.length) requesterConditions.push(`requester.id = :requesterId`);
+      where.push(`(${requesterConditions.join(" OR ")})`);
+    } else {
+      where.push(`LOWER(requester.${userColumns.usernameColumn}) = LOWER(:requesterId)`);
+      binds.requesterId = input.requesterId;
+    }
+  }
+
   return {
     whereSql: where.length ? `WHERE ${where.join(" AND ")}` : "",
     binds
@@ -155,6 +175,28 @@ export async function listTickets(filters: TicketFilters = {}) {
     const assignedSelect = ticketColumns.hasAssignedTo ? "assignee." : "requester.";
     const assignedJoin = ticketColumns.hasAssignedTo ? "LEFT JOIN users assignee ON assignee.id = t.assigned_to" : "";
     const { whereSql, binds } = buildTicketFilters(filters, ticketColumns, userColumns);
+    if (filters.requesterId && /^\d+$/.test(filters.requesterId)) {
+      const requesterDebug = await connection.execute(
+        `SELECT id, ${userColumns.usernameColumn} AS username, ${userColumns.nameExpression} AS full_name,
+                ${userColumns.employeeIdExpression} AS employee_id
+         FROM users
+         WHERE id = :requesterId`,
+        { requesterId: Number(filters.requesterId) }
+      );
+      console.info("[tickets] Requester debug", (requesterDebug.rows || [])[0] || { id: filters.requesterId, found: false });
+    }
+    console.info("[tickets] List query filters", {
+      assignedTo: filters.assignedTo || "all",
+      assignedToBind: binds.assignedTo ?? null,
+      requesterId: filters.requesterId || "all",
+      requesterIdBind: binds.requesterId ?? null,
+      requesterColumns: {
+        requester_id: ticketColumns.hasRequesterId,
+        created_by: ticketColumns.hasCreatedBy
+      },
+      usesAssignedToColumn: ticketColumns.hasAssignedTo,
+      whereSql
+    });
     const result = await connection.execute(
       `SELECT t.id, t.title, t.category,
               ${optionalSelect(ticketColumns.columns, "subcategory", "subcategory")},
@@ -164,8 +206,10 @@ export async function listTickets(filters: TicketFilters = {}) {
               ${optionalSelect(ticketColumns.columns, "asset_tag_manual", "asset_tag_manual")},
               t.status, t.priority, t.created_at,
               ${ticketColumns.hasUpdatedAt ? "t.updated_at" : "t.created_at"} AS updated_at,
+              requester.id AS requester_user_id,
               requester.${userColumns.nameExpression} AS requester_name,
               requester.${userColumns.usernameColumn} AS requester_id,
+              ${assignedSelect}id AS assigned_to_user_id,
               ${assignedSelect}${userColumns.nameExpression} AS assigned_to_name,
               ${assignedSelect}${userColumns.usernameColumn} AS assigned_to_id,
               ${ticketColumns.hasUpdatedAt ? "t.updated_at" : "t.created_at"} AS assigned_at,
@@ -177,7 +221,16 @@ export async function listTickets(filters: TicketFilters = {}) {
        ORDER BY t.created_at DESC`,
       binds
     );
-    console.info("[oracle] Tickets query success");
+    console.info("[oracle] Tickets query success", {
+      rowCount: Array.isArray(result.rows) ? result.rows.length : 0,
+      assignedTo: filters.assignedTo || "all",
+      requesterId: filters.requesterId || "all",
+      requesterSamples: ((result.rows || []) as Array<any>).slice(0, 5).map((row) => ({
+        ticketId: row.ID,
+        requesterUserId: row.REQUESTER_USER_ID,
+        requesterLogin: row.REQUESTER_ID
+      }))
+    });
     return result.rows || [];
   } catch (error) {
     console.info(`[oracle] Tickets query failed: ${error instanceof Error ? error.message : "unknown error"}`);
@@ -283,6 +336,12 @@ export async function createTicket(input: CreateTicketInput) {
   const connection = await getConnection();
   try {
     const ticketColumns = await getTicketColumns(connection);
+    console.info("[tickets] Ticket insert requester mapping", {
+      requesterUsersId: input.requesterId,
+      requesterColumn: ticketColumns.requesterColumn,
+      hasRequesterId: ticketColumns.hasRequesterId,
+      hasCreatedBy: ticketColumns.hasCreatedBy
+    });
     const columnValues: Array<[string, string, unknown]> = [
       ["title", "title", input.title],
       ["description", "description", input.description || null],
@@ -410,6 +469,10 @@ export async function assignTicketToEngineer(input: { ticketId: number; engineer
     const ticketColumns = await getTicketColumns(connection);
     const updatedAtSql = ticketColumns.hasUpdatedAt ? ", updated_at = CURRENT_TIMESTAMP" : "";
     if (ticketColumns.hasAssignedTo) {
+      console.info("[tickets] Updating assignment", {
+        ticketId: input.ticketId,
+        assignedToUsersId: input.engineerId
+      });
       await connection.execute(
         `UPDATE tickets SET assigned_to = :engineerId, status = 'assigned'${updatedAtSql} WHERE id = :ticketId`,
         { ticketId: input.ticketId, engineerId: input.engineerId }

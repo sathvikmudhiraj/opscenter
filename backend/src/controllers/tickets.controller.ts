@@ -7,7 +7,8 @@ const ticketFilterSchema = z.object({
   status: z.string().optional(),
   priority: z.string().optional(),
   category: z.string().optional(),
-  assignedTo: z.string().optional()
+  assignedTo: z.string().optional(),
+  requesterId: z.string().optional()
 });
 
 const ticketSchema = z.object({
@@ -50,6 +51,13 @@ const engineerActionSchema = z.object({
 
 export const getTickets = asyncHandler(async (req, res) => {
   const filters = ticketFilterSchema.parse(req.query);
+  console.info("[tickets] Current user loading tickets", {
+    userId: req.user?.sub,
+    username: req.user?.username,
+    role: req.user?.role,
+    assignedToFilter: filters.assignedTo || "all",
+    requesterIdFilter: filters.requesterId || "all"
+  });
   const tickets = await listTickets(filters);
   res.json({ data: Array.isArray(tickets) ? tickets : [] });
 });
@@ -60,12 +68,22 @@ export const getTicket = asyncHandler(async (req, res) => {
 
 export const postTicket = asyncHandler(async (req, res) => {
   const input = ticketSchema.parse(req.body);
+  console.info("[tickets] Creating ticket with authenticated users.id", {
+    userId: req.user!.sub,
+    username: req.user?.username,
+    role: req.user?.role
+  });
   const ticket = await createTicket({ ...input, requesterId: req.user!.sub });
   res.status(201).json({ message: "Ticket created", data: ticket });
 });
 
 export const assignTicket = asyncHandler(async (req, res) => {
   const input = assignSchema.parse(req.body);
+  console.info("[tickets] Assign request uses users.id", {
+    ticketId: Number(req.params.id),
+    engineerUserId: input.engineerId,
+    adminUserId: req.user!.sub
+  });
   await assignTicketToEngineer({ ticketId: Number(req.params.id), engineerId: input.engineerId, adminId: req.user!.sub });
   res.json({ message: "Engineer assigned" });
 });

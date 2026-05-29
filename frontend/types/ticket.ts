@@ -10,7 +10,9 @@ export interface Ticket {
   status: "open" | "assigned" | "in_progress" | "waiting_for_parts" | "escalated" | "resolved" | "closed";
   priority: "low" | "medium" | "high" | "critical";
   requesterName: string;
+  requesterUserId?: number;
   requesterId?: string;
+  assignedToUserId?: number;
   assignedToName?: string;
   assignedToId?: string;
   slaRisk?: "low" | "medium" | "high";

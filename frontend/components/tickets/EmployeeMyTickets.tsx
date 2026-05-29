@@ -16,15 +16,14 @@ export function EmployeeMyTickets({ tickets: providedTickets, filter = "all", lo
 
   useEffect(() => {
     if (providedTickets) return;
-    api.get<{ data: any[] }>("/tickets").then(({ data }) => setLocalTickets(data.data.map(normalizeTicket))).catch(() => setLocalTickets([]));
-  }, [providedTickets]);
+    api.get<{ data: any[] }>(`/tickets?requesterId=${user?.id ?? ""}`).then(({ data }) => setLocalTickets(data.data.map(normalizeTicket))).catch(() => setLocalTickets([]));
+  }, [providedTickets, user?.id]);
 
   const tickets = providedTickets || localTickets;
 
   const mine = useMemo(() => {
-    const loginId = user?.email?.toLowerCase();
     return tickets.filter((ticket) => {
-      const belongsToUser = loginId ? ticket.requesterId?.toLowerCase() === loginId : true;
+      const belongsToUser = user?.id ? ticket.requesterUserId === user.id : true;
       const matchesFilter =
         filter === "all" ||
         (filter === "open" && ticket.status === "open") ||
@@ -34,7 +33,7 @@ export function EmployeeMyTickets({ tickets: providedTickets, filter = "all", lo
       const haystack = `${ticket.id} ${ticket.title} ${ticket.priority} ${ticket.status} ${ticket.assignedToName || ""}`.toLowerCase();
       return belongsToUser && matchesFilter && haystack.includes(search.toLowerCase());
     });
-  }, [filter, search, tickets, user?.email]);
+  }, [filter, search, tickets, user?.id]);
 
   return (
     <section className="rounded-lg border border-slate-200 bg-white shadow-sm">

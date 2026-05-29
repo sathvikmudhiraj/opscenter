@@ -24,11 +24,11 @@ export function EngineerDashboardClient() {
     setLoading(true);
     setError("");
     try {
-      const { data: ticketData } = await api.get<{ data: any[] }>("/tickets");
+      const currentEngineer = getSessionUser();
+      const { data: ticketData } = await api.get<{ data: any[] }>(`/tickets?assignedTo=${currentEngineer?.id ?? ""}`);
       const normalizedTickets = ticketData.data.map(normalizeTicket);
-      const loginId = getSessionUser()?.email?.toLowerCase();
       const engineerTickets = normalizedTickets.filter((ticket) => {
-        const belongsToEngineer = loginId ? ticket.assignedToId?.toLowerCase() === loginId : Boolean(ticket.assignedToId);
+        const belongsToEngineer = currentEngineer?.id ? ticket.assignedToUserId === currentEngineer.id : Boolean(ticket.assignedToUserId);
         return belongsToEngineer;
       });
       const detailResponses = await Promise.allSettled(
@@ -62,12 +62,11 @@ export function EngineerDashboardClient() {
   }, []);
 
   const queue = useMemo(() => {
-    const loginId = engineer?.email?.toLowerCase();
     return tickets.filter((ticket) => {
-      const belongsToEngineer = loginId ? ticket.assignedToId?.toLowerCase() === loginId : Boolean(ticket.assignedToId);
+      const belongsToEngineer = engineer?.id ? ticket.assignedToUserId === engineer.id : Boolean(ticket.assignedToUserId);
       return belongsToEngineer && ticket.status !== "closed";
     });
-  }, [engineer?.email, tickets]);
+  }, [engineer?.id, tickets]);
 
   const activeQueue = queue.filter((ticket) => !["resolved", "closed"].includes(ticket.status));
   const criticalAssigned = queue.filter((ticket) => ticket.priority === "critical" && !["resolved", "closed"].includes(ticket.status));
