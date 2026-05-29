@@ -3,6 +3,7 @@ import { env } from "./env";
 
 oracledb.outFormat = oracledb.OUT_FORMAT_OBJECT;
 oracledb.autoCommit = false;
+oracledb.fetchAsString = [oracledb.CLOB];
 
 let pool: any = null;
 

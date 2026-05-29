@@ -1,6 +1,6 @@
 UPDATE users
 SET role = 'engineer'
-WHERE role = 'technician';
+WHERE role NOT IN ('employee', 'engineer', 'admin');
 
 DECLARE
   v_constraint_name USER_CONSTRAINTS.CONSTRAINT_NAME%TYPE;
@@ -12,7 +12,6 @@ BEGIN
   WHERE uc.table_name = 'USERS'
     AND ucc.column_name = 'ROLE'
     AND uc.constraint_type = 'C'
-    AND LOWER(uc.search_condition_vc) LIKE '%technician%'
   FETCH FIRST 1 ROWS ONLY;
 
   EXECUTE IMMEDIATE 'ALTER TABLE users DROP CONSTRAINT ' || v_constraint_name;
@@ -22,7 +21,14 @@ EXCEPTION
 END;
 /
 
-ALTER TABLE users ADD CONSTRAINT chk_users_role
-CHECK (role IN ('employee', 'engineer', 'admin'));
+BEGIN
+  EXECUTE IMMEDIATE 'ALTER TABLE users ADD CONSTRAINT chk_users_role_standard CHECK (role IN (''employee'', ''engineer'', ''admin''))';
+EXCEPTION
+  WHEN OTHERS THEN
+    IF SQLCODE != -2264 AND SQLCODE != -955 THEN
+      RAISE;
+    END IF;
+END;
+/
 
 COMMIT;

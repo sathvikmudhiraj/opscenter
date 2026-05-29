@@ -2,6 +2,11 @@ export interface Ticket {
   id: number;
   title: string;
   category: string;
+  subcategory?: string;
+  department?: string;
+  block?: string;
+  roomNumber?: string;
+  assetTagManual?: string;
   status: "open" | "assigned" | "in_progress" | "waiting_for_parts" | "escalated" | "resolved" | "closed";
   priority: "low" | "medium" | "high" | "critical";
   requesterName: string;

@@ -51,10 +51,12 @@ export function TicketDetailView({ id }: { id: string }) {
           <h2 className="text-lg font-semibold text-slate-950">{ticket.title}</h2>
           <p className="mt-2 text-sm leading-6 text-slate-600">{ticket.description}</p>
           <div className="mt-6 grid gap-4 md:grid-cols-2">
+            <Info label="Category" value={ticket.subcategory ? `${ticket.category} / ${ticket.subcategory}` : ticket.category} />
             <Info label="Employee" value={`${ticket.employee?.name || ticket.requesterName} (${ticket.employee?.loginId || ""})`} />
-            <Info label="Department" value={ticket.employee?.department || "N/A"} />
-            <Info label="Location" value={ticket.employee?.location || "N/A"} />
+            <Info label="Department" value={ticket.department || ticket.employee?.department || "N/A"} />
+            <Info label="Location" value={ticket.block || ticket.roomNumber ? `Block ${ticket.block || "N/A"} / Room ${ticket.roomNumber || "N/A"}` : ticket.employee?.location || "N/A"} />
             <Info label="Asset" value={ticket.asset ? `${ticket.asset.assetTag} - ${ticket.asset.model}` : "No asset linked"} />
+            <Info label="Manual Asset Tag" value={ticket.assetTagManual || "N/A"} />
           </div>
         </div>
         <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">

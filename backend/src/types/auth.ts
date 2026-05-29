@@ -4,6 +4,8 @@ export interface JwtPayload {
   sub: number;
   role: UserRole;
   email: string;
+  username: string;
+  fullName?: string;
 }
 
 declare global {

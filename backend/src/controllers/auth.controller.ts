@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { login, setupAdmin, getBootstrapState } from "../services/auth.service";
+import { getUserProfile } from "../services/user.service";
 import { asyncHandler } from "../utils/asyncHandler";
 
 const credentialsSchema = z.object({
@@ -27,4 +28,8 @@ export const signIn = asyncHandler(async (req, res) => {
 
 export const validateRole = asyncHandler(async (req, res) => {
   res.json({ valid: true, user: req.user });
+});
+
+export const me = asyncHandler(async (req, res) => {
+  res.json({ data: await getUserProfile(req.user!.sub) });
 });

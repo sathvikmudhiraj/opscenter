@@ -3,19 +3,25 @@
 import Link from "next/link";
 import { FormEvent, useState } from "react";
 import { ArrowLeft, CheckCircle2, KeyRound, RadioTower, UserRound } from "lucide-react";
+import { api } from "@/lib/api";
 
 export default function ForgotPasswordPage() {
   const [userId, setUserId] = useState("");
   const [status, setStatus] = useState<"idle" | "success" | "error">("idle");
 
-  function onSubmit(event: FormEvent) {
+  async function onSubmit(event: FormEvent) {
     event.preventDefault();
     const trimmed = userId.trim();
     if (trimmed.length < 2) {
       setStatus("error");
       return;
     }
-    setStatus("success");
+    try {
+      await api.post("/password-resets/request", { username: trimmed });
+      setStatus("success");
+    } catch {
+      setStatus("error");
+    }
   }
 
   return (

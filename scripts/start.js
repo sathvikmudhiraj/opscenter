@@ -70,7 +70,7 @@ async function main() {
         command: "npm run start --workspace @opscenter/backend",
         name: "backend",
         prefixColor: "green",
-        env: { PORT: String(backendPort), DATA_MODE: "mock", FRONTEND_URL: `http://localhost:${frontendPort}` }
+        env: { PORT: String(backendPort), FRONTEND_URL: `http://localhost:${frontendPort}` }
       },
       {
         command: "npm run start --workspace @opscenter/frontend",

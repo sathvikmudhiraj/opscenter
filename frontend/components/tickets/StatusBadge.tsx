@@ -1,6 +1,6 @@
 import { statusLabel } from "@/lib/tickets";
 
-export function StatusBadge({ status }: { status: string }) {
+export function StatusBadge({ status }: { status?: string | null }) {
   const tone =
     status === "critical" || status === "escalated" || status === "breached"
       ? "bg-red-50 text-red-700"

@@ -1,7 +1,17 @@
 CREATE INDEX idx_users_role ON users(role);
+CREATE INDEX idx_users_username ON users(username);
+CREATE INDEX idx_users_email ON users(email);
+CREATE INDEX idx_users_employee_id ON users(employee_id);
+CREATE INDEX idx_pwd_reset_user ON password_reset_requests(user_id);
+CREATE INDEX idx_pwd_reset_status ON password_reset_requests(status, requested_at);
 CREATE INDEX idx_tickets_status_priority ON tickets(status, priority);
 CREATE INDEX idx_tickets_requester ON tickets(requester_id);
 CREATE INDEX idx_tickets_assigned_to ON tickets(assigned_to);
 CREATE INDEX idx_assets_assigned_to ON assets(assigned_to);
+CREATE INDEX idx_assets_assigned_employee ON assets(assigned_employee);
+CREATE INDEX idx_assets_serial_number ON assets(serial_number);
+CREATE INDEX idx_assets_lifecycle_state ON assets(lifecycle_state);
+CREATE INDEX idx_assets_warranty_expiry ON assets(warranty_expiry);
 CREATE INDEX idx_notifications_user_read ON notifications(user_id, read_at);
 CREATE INDEX idx_asset_requests_requester ON asset_requests(requester_id);
+CREATE INDEX idx_audit_logs_created ON audit_logs(created_at);

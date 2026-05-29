@@ -2,12 +2,25 @@ import { z } from "zod";
 import { assignTicketToEngineer, createTicket, escalateTicketById, getTicketById, listTickets, saveEngineerAction, updateTicketPriority, updateTicketStatus } from "../services/ticket.service";
 import { asyncHandler } from "../utils/asyncHandler";
 
+const ticketFilterSchema = z.object({
+  search: z.string().optional(),
+  status: z.string().optional(),
+  priority: z.string().optional(),
+  category: z.string().optional(),
+  assignedTo: z.string().optional()
+});
+
 const ticketSchema = z.object({
   title: z.string().min(3),
-  description: z.string().optional(),
+  description: z.string().min(3),
   category: z.string().min(2),
+  subcategory: z.string().min(2).optional(),
   priority: z.enum(["low", "medium", "high", "critical"]),
   assetId: z.coerce.number().optional(),
+  department: z.string().optional(),
+  block: z.string().optional(),
+  roomNumber: z.string().optional(),
+  assetTagManual: z.string().optional(),
   screenshotUrl: z.string().optional()
 });
 
@@ -35,8 +48,10 @@ const engineerActionSchema = z.object({
   remarks: z.string().optional()
 });
 
-export const getTickets = asyncHandler(async (_req, res) => {
-  res.json({ data: await listTickets() });
+export const getTickets = asyncHandler(async (req, res) => {
+  const filters = ticketFilterSchema.parse(req.query);
+  const tickets = await listTickets(filters);
+  res.json({ data: Array.isArray(tickets) ? tickets : [] });
 });
 
 export const getTicket = asyncHandler(async (req, res) => {

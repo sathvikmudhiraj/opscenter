@@ -2,49 +2,69 @@ import type { Ticket, TicketDetail } from "@/types/ticket";
 
 type ApiTicket = Record<string, any>;
 
-export function normalizeTicket(ticket: ApiTicket): Ticket {
+export function asArray<T = any>(value: unknown): T[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function stringValue(value: unknown, fallback = "") {
+  return typeof value === "string" && value.length ? value : fallback;
+}
+
+function numberValue(value: unknown, fallback = 0) {
+  const next = Number(value);
+  return Number.isFinite(next) ? next : fallback;
+}
+
+export function normalizeTicket(ticket: ApiTicket | null | undefined): Ticket {
+  const source = ticket || {};
   return {
-    id: ticket.ID,
-    title: ticket.TITLE,
-    category: ticket.CATEGORY,
-    status: ticket.STATUS,
-    priority: ticket.PRIORITY,
-    requesterName: ticket.REQUESTER_NAME,
-    requesterId: ticket.REQUESTER_ID,
-    assignedToName: ticket.ASSIGNED_TO_NAME,
-    assignedToId: ticket.ASSIGNED_TO_ID,
-    slaRisk: ticket.SLA_RISK,
-    slaDeadline: ticket.SLA_DEADLINE,
-    slaStatus: ticket.SLA_STATUS,
-    createdAt: ticket.CREATED_AT,
-    assignedAt: ticket.ASSIGNED_AT || ticket.UPDATED_AT || ticket.CREATED_AT,
-    updatedAt: ticket.UPDATED_AT
+    id: numberValue(source.ID),
+    title: stringValue(source.TITLE, "Untitled ticket"),
+    category: stringValue(source.CATEGORY, "Uncategorized"),
+    subcategory: source.SUBCATEGORY || undefined,
+    department: source.DEPARTMENT || undefined,
+    block: source.BLOCK || undefined,
+    roomNumber: source.ROOM_NUMBER || undefined,
+    assetTagManual: source.ASSET_TAG_MANUAL || undefined,
+    status: stringValue(source.STATUS, "open") as Ticket["status"],
+    priority: stringValue(source.PRIORITY, "low") as Ticket["priority"],
+    requesterName: stringValue(source.REQUESTER_NAME, "Unknown user"),
+    requesterId: source.REQUESTER_ID || undefined,
+    assignedToName: source.ASSIGNED_TO_NAME || undefined,
+    assignedToId: source.ASSIGNED_TO_ID || undefined,
+    slaRisk: source.SLA_RISK || undefined,
+    slaDeadline: source.SLA_DEADLINE || undefined,
+    slaStatus: source.SLA_STATUS || undefined,
+    createdAt: stringValue(source.CREATED_AT, new Date(0).toISOString()),
+    assignedAt: source.ASSIGNED_AT || source.UPDATED_AT || source.CREATED_AT || undefined,
+    updatedAt: source.UPDATED_AT || undefined
   };
 }
 
-export function normalizeTicketDetail(ticket: ApiTicket): TicketDetail {
+export function normalizeTicketDetail(ticket: ApiTicket | null | undefined): TicketDetail {
+  const source = ticket || {};
   return {
-    ...normalizeTicket(ticket),
-    description: ticket.DESCRIPTION,
-    screenshotUrl: ticket.SCREENSHOT_URL,
-    serviceImageUrl: ticket.SERVICE_IMAGE_URL,
-    engineerNotes: ticket.ENGINEER_NOTES,
-    rootCause: ticket.ROOT_CAUSE,
-    correctiveAction: ticket.CORRECTIVE_ACTION,
-    preventiveAction: ticket.PREVENTIVE_ACTION,
-    partsUsed: ticket.PARTS_USED,
-    remarks: ticket.REMARKS,
-    imageRetentionDays: ticket.IMAGE_RETENTION_DAYS,
-    resolvedAt: ticket.RESOLVED_AT,
-    employee: ticket.EMPLOYEE,
-    engineer: ticket.ENGINEER,
-    asset: ticket.ASSET,
-    timeline: ticket.TIMELINE || []
+    ...normalizeTicket(source),
+    description: source.DESCRIPTION || "",
+    screenshotUrl: source.SCREENSHOT_URL || undefined,
+    serviceImageUrl: source.SERVICE_IMAGE_URL || undefined,
+    engineerNotes: source.ENGINEER_NOTES || undefined,
+    rootCause: source.ROOT_CAUSE || undefined,
+    correctiveAction: source.CORRECTIVE_ACTION || undefined,
+    preventiveAction: source.PREVENTIVE_ACTION || undefined,
+    partsUsed: source.PARTS_USED || undefined,
+    remarks: source.REMARKS || undefined,
+    imageRetentionDays: numberValue(source.IMAGE_RETENTION_DAYS, 60),
+    resolvedAt: source.RESOLVED_AT || undefined,
+    employee: source.EMPLOYEE || undefined,
+    engineer: source.ENGINEER || undefined,
+    asset: source.ASSET || undefined,
+    timeline: asArray(source.TIMELINE)
   };
 }
 
-export function statusLabel(status: string) {
-  return status.replaceAll("_", " ");
+export function statusLabel(status?: string | null) {
+  return stringValue(status, "unknown").replaceAll("_", " ");
 }
 
 const slaHoursByPriority: Record<string, number> = {

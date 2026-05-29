@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ChevronDown, Eye, EyeOff, KeyRound, Loader2, UserRound } from "lucide-react";
+import { Eye, EyeOff, KeyRound, Loader2, UserRound } from "lucide-react";
 import { api } from "@/lib/api";
 import { getDashboardPath, saveSession } from "@/lib/auth";
 import type { AuthResponse } from "@/types/auth";
@@ -17,20 +17,7 @@ export function LoginForm() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
-  const [showDemo, setShowDemo] = useState(false);
   const [rememberMe, setRememberMe] = useState(false);
-
-  const demos = [
-    { label: "Employee", userId: "1001", password: "Ops@12345" },
-    { label: "Engineer", userId: "ds01", password: "Ops@12345" },
-    { label: "Admin", userId: "admin", password: "Ops@12345" }
-  ];
-
-  function fillDemo(userId: string, demoPassword: string) {
-    setEmail(userId);
-    setPassword(demoPassword);
-    setError("");
-  }
 
   useEffect(() => {
     const remembered = window.localStorage.getItem(REMEMBER_USER_KEY);
@@ -61,7 +48,7 @@ export function LoginForm() {
         window.localStorage.removeItem(REMEMBER_USER_KEY);
       }
       saveSession(data);
-      window.location.assign(getDashboardPath(data.user.role));
+      window.location.assign(data.user.forcePasswordChange ? "/change-password" : getDashboardPath(data.user.role));
     } catch (requestError) {
       const message = requestError instanceof Error ? requestError.message : "";
       setError(errorMessage(message));
@@ -89,21 +76,7 @@ export function LoginForm() {
 
       <div className="flex items-center justify-between gap-3">
         <Link href="/forgot-password" className="text-sm font-semibold text-blue-300 transition hover:text-blue-200">Forgot Password?</Link>
-        <button type="button" onClick={() => setShowDemo(!showDemo)} className="inline-flex items-center gap-2 rounded-md border border-white/10 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:border-blue-300/50 hover:bg-white/10" aria-expanded={showDemo}>
-          Demo Accounts
-          <ChevronDown className={`h-3.5 w-3.5 transition ${showDemo ? "rotate-180" : ""}`} />
-        </button>
       </div>
-
-      {showDemo ? (
-        <div className="grid gap-2 rounded-lg border border-white/10 bg-white/[0.04] p-3 sm:grid-cols-3">
-          {demos.map((demo) => (
-            <button key={demo.label} type="button" onClick={() => fillDemo(demo.userId, demo.password)} className="rounded-md bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-100 transition hover:bg-blue-600">
-              {demo.label}
-            </button>
-          ))}
-        </div>
-      ) : null}
 
       <label className="flex items-center gap-3 text-sm font-medium text-slate-300">
         <input

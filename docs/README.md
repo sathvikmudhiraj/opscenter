@@ -1,6 +1,6 @@
 # OpsCenter
 
-OpsCenter is an enterprise PC support and ticket management scaffold with a Next.js App Router frontend, Express API, Oracle Database schema, JWT authentication, and bcrypt password hashing.
+OpsCenter is an enterprise PC support and ticket management app with a Next.js App Router frontend, Express API, Oracle Database schema, JWT authentication, and bcrypt password hashing.
 
 ## Structure
 
@@ -15,6 +15,8 @@ OpsCenter is an enterprise PC support and ticket management scaffold with a Next
    - `database/01_schema.sql`
    - `database/02_indexes.sql`
    - optionally `database/03_seed_optional.sql`
+   - for existing schemas, run `database/05_oracle_runtime_alignment.sql`
+   - optionally run `database/06_seed_test_users.sql` to align the local Oracle admin baseline
 2. Copy `backend/.env.example` to `backend/.env` and set Oracle credentials plus `JWT_SECRET`.
 3. Copy `frontend/.env.example` to `frontend/.env.local`.
 4. Start the API: `npm run dev` from `backend/`.

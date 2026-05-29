@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { Plus, X } from "lucide-react";
 import { api } from "@/lib/api";
 import type { Ticket } from "@/types/ticket";
+import { asArray, normalizeTicket as normalizeApiTicket } from "@/lib/tickets";
 
 type ApiTicket = {
   ID: number;
@@ -21,19 +22,6 @@ const fallbackTickets: Ticket[] = [
   { id: 1047, title: "VPN client reset", category: "Network", status: "in_progress", priority: "high", requesterName: "Daniel Cho", assignedToName: "M. Rao", createdAt: "2026-05-25" }
 ];
 
-function normalizeTicket(ticket: ApiTicket): Ticket {
-  return {
-    id: ticket.ID,
-    title: ticket.TITLE,
-    category: ticket.CATEGORY,
-    status: ticket.STATUS,
-    priority: ticket.PRIORITY,
-    requesterName: ticket.REQUESTER_NAME,
-    assignedToName: ticket.ASSIGNED_TO_NAME,
-    createdAt: ticket.CREATED_AT
-  };
-}
-
 export function TicketTable() {
   const [tickets, setTickets] = useState<Ticket[]>(fallbackTickets);
   const [open, setOpen] = useState(false);
@@ -49,8 +37,14 @@ export function TicketTable() {
   async function loadTickets() {
     try {
       const { data } = await api.get<{ data: ApiTicket[] }>("/tickets");
-      setTickets(data.data.map(normalizeTicket));
-    } catch {
+      console.debug("[TicketTable] fetched ticket data", data);
+      console.debug("[TicketTable] API response shape", {
+        ticketsIsArray: Array.isArray(data?.data),
+        ticketCount: asArray(data?.data).length
+      });
+      setTickets(asArray(data?.data).map(normalizeApiTicket));
+    } catch (requestError) {
+      console.debug("[TicketTable] ticket load failed", requestError);
       setTickets(fallbackTickets);
     }
   }
@@ -61,15 +55,32 @@ export function TicketTable() {
 
   async function onSubmit(event: FormEvent) {
     event.preventDefault();
+    const title = form.title.trim();
+    const description = form.description.trim();
+    if (title.length < 3) {
+      setError("Issue title must be at least 3 characters.");
+      return;
+    }
+    if (description.length < 3) {
+      setError("Description must be at least 3 characters.");
+      return;
+    }
+
     setLoading(true);
     setError("");
     try {
-      await api.post("/tickets", form);
+      await api.post("/tickets", {
+        ...form,
+        title,
+        description,
+        subcategory: form.category
+      });
       setForm({ title: "", description: "", category: "Hardware", priority: "medium" });
       setOpen(false);
       await loadTickets();
-    } catch {
-      setError("Could not create ticket. Please login again and retry.");
+    } catch (requestError) {
+      console.debug("[TicketTable] ticket create failed", requestError);
+      setError(requestError instanceof Error ? requestError.message : "Could not create ticket.");
     } finally {
       setLoading(false);
     }
@@ -139,6 +150,7 @@ export function TicketTable() {
               <label className="block">
                 <span className="text-sm font-medium text-slate-700">Description</span>
                 <textarea
+                  required
                   value={form.description}
                   onChange={(event) => setForm({ ...form, description: event.target.value })}
                   className="mt-1 min-h-24 w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-600 focus:ring-4 focus:ring-blue-100"

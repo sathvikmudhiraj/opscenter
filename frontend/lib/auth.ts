@@ -8,6 +8,11 @@ export function saveSession(session: AuthResponse) {
   localStorage.setItem(USER_KEY, JSON.stringify(session.user));
 }
 
+export function saveSessionUser(user: AuthUser) {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(USER_KEY, JSON.stringify(user));
+}
+
 export function clearSession() {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(USER_KEY);
