@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { clearSession, getSessionUser } from "@/lib/auth";
+import { clearSession, getSessionToken, getSessionUser } from "@/lib/auth";
 import type { UserRole } from "@/types/auth";
 
 const VALID_ROLES: UserRole[] = ["employee", "engineer", "admin"];
@@ -25,8 +25,9 @@ export function RoleGuard({ role, children }: { role: UserRole; children: React.
       }
     }, 2500);
 
+    const token = getSessionToken();
     const user = getSessionUser();
-    if (!user || !VALID_ROLES.includes(user.role)) {
+    if (!token || !user || !VALID_ROLES.includes(user.role)) {
       clearSession();
       setMessage("Redirecting to login...");
       redirect("/login");

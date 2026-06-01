@@ -94,6 +94,7 @@ CREATE TABLE notifications (
   user_id NUMBER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   title VARCHAR2(160) NOT NULL,
   body VARCHAR2(1000),
+  is_read CHAR(1) DEFAULT 'N' CHECK (is_read IN ('Y', 'N')) NOT NULL,
   read_at TIMESTAMP,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
 );

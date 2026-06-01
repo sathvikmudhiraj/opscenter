@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { assetsRouter } from "./assets.routes";
 import { authRouter } from "./auth.routes";
+import { infrastructureRouter } from "./infrastructure.routes";
 import { notificationsRouter } from "./notifications.routes";
 import { passwordResetRouter } from "./passwordReset.routes";
 import { reportsRouter } from "./reports.routes";
@@ -15,6 +16,7 @@ apiRouter.use("/auth", authRouter);
 apiRouter.use("/tickets", ticketsRouter);
 apiRouter.use("/users", usersRouter);
 apiRouter.use("/assets", assetsRouter);
+apiRouter.use("/infrastructure", infrastructureRouter);
 apiRouter.use("/notifications", notificationsRouter);
 apiRouter.use("/password-resets", passwordResetRouter);
 apiRouter.use("/reports", reportsRouter);

@@ -1,4 +1,5 @@
 import { getConnection } from "../config/database";
+import { getUnreadNotificationCount } from "./notification.service";
 
 async function tableExists(connection: any, tableName: string) {
   const result = await connection.execute(
@@ -52,13 +53,130 @@ function dayKey(date: Date) {
   return date.toISOString().slice(0, 10);
 }
 
+const resolvedStatuses = new Set(["resolved", "closed"]);
+
+type SlaTicket = {
+  id: number;
+  title: string;
+  priority: string;
+  status: string;
+  createdAt: Date;
+  updatedAt: Date | null;
+  resolvedAt: Date | null;
+  dueAt: Date;
+  assignedEngineer: string;
+  breached: boolean;
+  atRisk: boolean;
+  compliant: boolean;
+  resolutionMinutes: number | null;
+  remaining: string;
+};
+
+type SlaSummary = {
+  slaCompliance: number | null;
+  withinSla: number;
+  breaches: number;
+  atRisk: number;
+  averageResolutionTimeMinutes: number | null;
+  trackableTickets: number;
+};
+
+function isResolvedStatus(status: string) {
+  return resolvedStatuses.has(status);
+}
+
+function evaluateSla(row: Record<string, any>, now: Date): SlaTicket | null {
+  const createdAt = asDate(row.CREATED_AT);
+  const priority = String(row.PRIORITY || "low").toLowerCase();
+  const dueAt = asDate(row.SLA_DUE_AT) || asDate(row.SLA_DEADLINE) || (createdAt ? addHours(createdAt, priorityHours(priority)) : null);
+  if (!createdAt || !dueAt) return null;
+
+  const status = String(row.STATUS || "open").toLowerCase();
+  const updatedAt = asDate(row.UPDATED_AT);
+  const resolvedAt = asDate(row.RESOLVED_AT);
+  const resolved = isResolvedStatus(status);
+  const active = !resolved;
+  const resolvedWithinSla = Boolean(resolvedAt && resolvedAt.getTime() <= dueAt.getTime());
+  const activeWithinSla = active && now.getTime() <= dueAt.getTime();
+  const breached = resolved
+    ? Boolean(resolvedAt && resolvedAt.getTime() > dueAt.getTime())
+    : now.getTime() > dueAt.getTime();
+  const totalWindow = dueAt.getTime() - createdAt.getTime();
+  const remainingMs = dueAt.getTime() - now.getTime();
+  const atRisk = active && !breached && totalWindow > 0 && remainingMs <= totalWindow * 0.25;
+  const resolutionMinutes = resolvedAt
+    ? Math.max(0, Math.round((resolvedAt.getTime() - createdAt.getTime()) / 60000))
+    : null;
+
+  return {
+    id: Number(row.ID),
+    title: String(row.TITLE || "Untitled ticket"),
+    priority,
+    status,
+    createdAt,
+    updatedAt,
+    resolvedAt,
+    dueAt,
+    assignedEngineer: String(row.ASSIGNED_ENGINEER || "Unassigned"),
+    breached,
+    atRisk,
+    compliant: resolvedWithinSla || activeWithinSla,
+    resolutionMinutes,
+    remaining: formatRemaining(dueAt, now)
+  };
+}
+
+function summarizeSla(rows: SlaTicket[]): SlaSummary {
+  const resolvedWithResolution = rows.filter((ticket) => ticket.resolutionMinutes !== null);
+  const withinSla = rows.filter((ticket) => ticket.compliant).length;
+  return {
+    slaCompliance: rows.length
+      ? Math.round((withinSla / rows.length) * 100)
+      : null,
+    withinSla,
+    breaches: rows.filter((ticket) => ticket.breached).length,
+    atRisk: rows.filter((ticket) => ticket.atRisk).length,
+    averageResolutionTimeMinutes: resolvedWithResolution.length
+      ? Math.round(resolvedWithResolution.reduce((sum, ticket) => sum + (ticket.resolutionMinutes || 0), 0) / resolvedWithResolution.length)
+      : null,
+    trackableTickets: rows.length
+  };
+}
+
+async function getSlaRows(connection: any, includeAssignee = false) {
+  const ticketColumns = await tableColumns(connection, "TICKETS");
+  const userColumns = await tableColumns(connection, "USERS");
+  const hasAssignedTo = includeAssignee && ticketColumns.has("ASSIGNED_TO") && userColumns.size > 0;
+  const nameColumn = userColumns.has("NAME") ? "name" : userColumns.has("USERNAME") ? "username" : userColumns.has("EMAIL") ? "email" : "login_id";
+  const assignedJoin = hasAssignedTo ? "LEFT JOIN users assignee ON assignee.id = t.assigned_to" : "";
+  const assignedNameSelect = hasAssignedTo ? `assignee.${nameColumn}` : "NULL";
+
+  const result = await connection.execute(
+    `SELECT t.id, t.title, t.priority, t.status, t.created_at,
+            ${ticketColumns.has("UPDATED_AT") ? "t.updated_at" : "NULL"} AS updated_at,
+            ${ticketColumns.has("RESOLVED_AT") ? "t.resolved_at" : "NULL"} AS resolved_at,
+            ${ticketColumns.has("SLA_DUE_AT") ? "t.sla_due_at" : "NULL"} AS sla_due_at,
+            ${ticketColumns.has("SLA_DEADLINE") ? "t.sla_deadline" : "NULL"} AS sla_deadline,
+            ${assignedNameSelect} AS assigned_engineer
+     FROM tickets t
+     ${assignedJoin}`
+  );
+
+  const now = new Date();
+  const rawRows = (result.rows || []) as Array<Record<string, any>>;
+  const slaRows = rawRows
+    .map((row) => evaluateSla(row, now))
+    .filter((ticket): ticket is SlaTicket => ticket !== null);
+  console.info(`SLA Engine processed ${slaRows.length} tickets. Raw tickets: ${rawRows.length}.`);
+  return slaRows;
+}
+
 export async function getAdminReports() {
   const connection = await getConnection();
   try {
     const hasTickets = await tableExists(connection, "TICKETS");
     const hasUsers = await tableExists(connection, "USERS");
     const hasAssets = await tableExists(connection, "ASSETS");
-    const hasNotifications = await tableExists(connection, "NOTIFICATIONS");
     const hasAuditLogs = await tableExists(connection, "AUDIT_LOGS");
 
     const totalTickets = hasTickets ? await scalar(connection, `SELECT COUNT(*) AS value FROM tickets`) : 0;
@@ -67,9 +185,16 @@ export async function getAdminReports() {
     const activeEngineers = hasUsers ? await scalar(connection, `SELECT COUNT(*) AS value FROM users WHERE role = 'engineer'`) : 0;
     const assetCount = hasAssets ? await scalar(connection, `SELECT COUNT(*) AS value FROM assets`) : 0;
     const securityAlerts = hasAuditLogs ? await scalar(connection, `SELECT COUNT(*) AS value FROM audit_logs WHERE LOWER(action) LIKE '%security%' OR LOWER(action) LIKE '%login%'`) : 0;
-    const notifications = hasNotifications ? await scalar(connection, `SELECT COUNT(*) AS value FROM notifications WHERE NVL(is_read, 0) = 0`) : 0;
-    const slaBreached = hasTickets ? await scalar(connection, `SELECT COUNT(*) AS value FROM tickets WHERE LOWER(NVL(sla_status, 'normal')) LIKE '%breach%'`) : 0;
-    const slaCompliance = totalTickets ? Math.round(((totalTickets - slaBreached) / totalTickets) * 100) : 100;
+    const notifications = await getUnreadNotificationCount();
+
+    const slaSummary = hasTickets ? summarizeSla(await getSlaRows(connection)) : summarizeSla([]);
+    const slaCompliance = {
+      value: slaSummary.slaCompliance,
+      label: slaSummary.slaCompliance === null ? "No SLA data" : `${slaSummary.slaCompliance}%`,
+      subtitle: slaSummary.slaCompliance === null
+        ? "No SLA-trackable tickets"
+        : `${slaSummary.trackableTickets} active/resolved tickets tracked`
+    };
 
     const byStatus = hasTickets ? (await connection.execute(
       `SELECT NVL(status, 'unknown') AS label, COUNT(*) AS value
@@ -111,7 +236,12 @@ export async function getAdminReports() {
         slaCompliance,
         assetCount,
         securityAlerts,
-        notifications
+        notifications,
+        slaWithinSla: slaSummary.withinSla,
+        slaBreached: slaSummary.breaches,
+        slaAtRisk: slaSummary.atRisk,
+        averageResolutionTimeMinutes: slaSummary.averageResolutionTimeMinutes,
+        slaTrackableTickets: slaSummary.trackableTickets
       },
       charts: {
         byStatus,
@@ -134,7 +264,7 @@ export async function getSlaReports() {
     const hasTickets = await tableExists(connection, "TICKETS");
     if (!hasTickets) {
       return {
-        stats: { slaCompliance: 100, breaches: 0, atRisk: 0, averageResponseTimeMinutes: 0 },
+        stats: { slaCompliance: null, withinSla: 0, breaches: 0, atRisk: 0, averageResolutionTimeMinutes: null, averageResponseTimeMinutes: null, trackableTickets: 0 },
         priorityMetrics: [],
         breachRiskQueue: [],
         engineerPerformance: [],
@@ -142,83 +272,24 @@ export async function getSlaReports() {
       };
     }
 
-    const ticketColumns = await tableColumns(connection, "TICKETS");
-    const userColumns = await tableColumns(connection, "USERS");
-    const requesterColumn = ticketColumns.has("REQUESTER_ID") ? "requester_id" : "created_by";
-    const hasAssignedTo = ticketColumns.has("ASSIGNED_TO");
-    const hasUpdatedAt = ticketColumns.has("UPDATED_AT");
-    const hasResolvedAt = ticketColumns.has("RESOLVED_AT");
-    const hasSlaDeadline = ticketColumns.has("SLA_DEADLINE");
-    const hasSlaStatus = ticketColumns.has("SLA_STATUS");
-    const usernameColumn = userColumns.has("USERNAME") ? "username" : userColumns.has("EMAIL") ? "email" : "login_id";
-    const nameColumn = userColumns.has("NAME") ? "name" : usernameColumn;
-    const assignedJoin = hasAssignedTo ? "LEFT JOIN users assignee ON assignee.id = t.assigned_to" : "";
-    const assignedNameSelect = hasAssignedTo ? `assignee.${nameColumn}` : "NULL";
-
-    const result = await connection.execute(
-      `SELECT t.id, t.title, t.priority, t.status, t.created_at,
-              ${hasUpdatedAt ? "t.updated_at" : "t.created_at"} AS updated_at,
-              ${hasResolvedAt ? "t.resolved_at" : "NULL"} AS resolved_at,
-              ${hasSlaDeadline ? "t.sla_deadline" : "NULL"} AS sla_deadline,
-              ${hasSlaStatus ? "t.sla_status" : "NULL"} AS sla_status,
-              ${assignedNameSelect} AS assigned_engineer
-       FROM tickets t
-       JOIN users requester ON requester.id = t.${requesterColumn}
-       ${assignedJoin}`
-    );
-
-    const now = new Date();
-    const rows = ((result.rows || []) as Array<Record<string, any>>).map((row) => {
-      const priority = String(row.PRIORITY || "low").toLowerCase();
-      const status = String(row.STATUS || "open").toLowerCase();
-      const createdAt = asDate(row.CREATED_AT) || now;
-      const updatedAt = asDate(row.UPDATED_AT);
-      const resolvedAt = asDate(row.RESOLVED_AT);
-      const dueAt = asDate(row.SLA_DEADLINE) || addHours(createdAt, priorityHours(priority));
-      const isResolved = status === "resolved" || status === "closed";
-      const remainingMs = dueAt.getTime() - now.getTime();
-      const storedStatus = String(row.SLA_STATUS || "").toLowerCase();
-      const breached = storedStatus.includes("breach") || (isResolved ? Boolean(resolvedAt && resolvedAt.getTime() > dueAt.getTime()) : remainingMs < 0);
-      const totalWindow = dueAt.getTime() - createdAt.getTime();
-      const atRisk = !breached && !isResolved && totalWindow > 0 && remainingMs <= totalWindow * 0.25;
-      const responseMinutes = updatedAt ? Math.max(0, Math.round((updatedAt.getTime() - createdAt.getTime()) / 60000)) : 0;
-      return {
-        id: Number(row.ID),
-        title: String(row.TITLE || "Untitled ticket"),
-        priority,
-        status,
-        createdAt,
-        dueAt,
-        resolvedAt,
-        assignedEngineer: String(row.ASSIGNED_ENGINEER || "Unassigned"),
-        breached,
-        atRisk,
-        responseMinutes,
-        remaining: formatRemaining(dueAt, now)
-      };
-    });
-
-    const totalTickets = rows.length;
-    const breaches = rows.filter((ticket) => ticket.breached).length;
-    const atRisk = rows.filter((ticket) => ticket.atRisk).length;
-    const slaCompliance = totalTickets ? Math.round(((totalTickets - breaches) / totalTickets) * 100) : 100;
-    const averageResponseTimeMinutes = totalTickets ? Math.round(rows.reduce((sum, ticket) => sum + ticket.responseMinutes, 0) / totalTickets) : 0;
+    const rows = await getSlaRows(connection, true);
+    const summary = summarizeSla(rows);
 
     const priorityMetrics = ["critical", "high", "medium", "low"].map((priority) => {
       const scoped = rows.filter((ticket) => ticket.priority === priority);
-      const scopedBreaches = scoped.filter((ticket) => ticket.breached).length;
-      const scopedAtRisk = scoped.filter((ticket) => ticket.atRisk).length;
+      const scopedSummary = summarizeSla(scoped);
       return {
         priority,
         total: scoped.length,
-        breaches: scopedBreaches,
-        atRisk: scopedAtRisk,
-        compliance: scoped.length ? Math.round(((scoped.length - scopedBreaches) / scoped.length) * 100) : 100
+        withinSla: scopedSummary.withinSla,
+        breaches: scopedSummary.breaches,
+        atRisk: scopedSummary.atRisk,
+        compliance: scopedSummary.slaCompliance ?? 0
       };
     });
 
     const breachRiskQueue = rows
-      .filter((ticket) => !["resolved", "closed"].includes(ticket.status) && (ticket.breached || ticket.atRisk))
+      .filter((ticket) => !isResolvedStatus(ticket.status) && (ticket.breached || ticket.atRisk))
       .sort((left, right) => left.dueAt.getTime() - right.dueAt.getTime())
       .slice(0, 25)
       .map((ticket) => ({
@@ -234,7 +305,7 @@ export async function getSlaReports() {
     for (const ticket of rows.filter((item) => item.assignedEngineer !== "Unassigned")) {
       const current = engineerMap.get(ticket.assignedEngineer) || { engineer: ticket.assignedEngineer, assignedTickets: 0, resolvedTickets: 0, breaches: 0 };
       current.assignedTickets += 1;
-      if (ticket.status === "resolved" || ticket.status === "closed") current.resolvedTickets += 1;
+      if (isResolvedStatus(ticket.status)) current.resolvedTickets += 1;
       if (ticket.breached) current.breaches += 1;
       engineerMap.set(ticket.assignedEngineer, current);
     }
@@ -243,27 +314,184 @@ export async function getSlaReports() {
       compliance: engineer.assignedTickets ? Math.round(((engineer.assignedTickets - engineer.breaches) / engineer.assignedTickets) * 100) : 100
     }));
 
+    const today = new Date();
     const trendDays = Array.from({ length: 7 }).map((_, index) => {
-      const date = new Date(now);
-      date.setDate(now.getDate() - (6 - index));
+      const date = new Date(today);
+      date.setDate(today.getDate() - (6 - index));
       return dayKey(date);
     });
     const trend = trendDays.map((date) => {
       const scoped = rows.filter((ticket) => dayKey(ticket.createdAt) === date);
-      const scopedBreaches = scoped.filter((ticket) => ticket.breached).length;
+      const scopedSummary = summarizeSla(scoped);
       return {
         label: date.slice(5),
-        value: scoped.length ? Math.round(((scoped.length - scopedBreaches) / scoped.length) * 100) : 100
+        value: scopedSummary.slaCompliance ?? 0
       };
     });
 
     return {
-      stats: { slaCompliance, breaches, atRisk, averageResponseTimeMinutes },
+      stats: {
+        slaCompliance: summary.slaCompliance,
+        withinSla: summary.withinSla,
+        breaches: summary.breaches,
+        atRisk: summary.atRisk,
+        averageResolutionTimeMinutes: summary.averageResolutionTimeMinutes,
+        averageResponseTimeMinutes: summary.averageResolutionTimeMinutes,
+        trackableTickets: summary.trackableTickets
+      },
       priorityMetrics,
       breachRiskQueue,
       engineerPerformance,
       trend
     };
+  } finally {
+    await connection.close();
+  }
+}
+export async function getTicketCategories() {
+  const connection = await getConnection();
+  try {
+    const hasTickets = await tableExists(connection, "TICKETS");
+    if (!hasTickets) {
+      return [];
+    }
+
+    const result = await connection.execute(
+      `SELECT NVL(category, 'Unknown') AS label, COUNT(*) AS value
+       FROM tickets
+       GROUP BY NVL(category, 'Unknown')
+       ORDER BY value DESC`
+    );
+
+    return ((result.rows || []) as Array<Record<string, unknown>>).map((row) => ({
+      label: String(row.LABEL || "Unknown"),
+      value: Number(row.VALUE || 0)
+    }));
+  } catch (error) {
+    console.error(`[oracle] Ticket categories query failed: ${error}`);
+    throw error;
+  } finally {
+    await connection.close();
+  }
+}
+
+export async function getSlaDistribution() {
+  const connection = await getConnection();
+  try {
+    const hasTickets = await tableExists(connection, "TICKETS");
+    if (!hasTickets) {
+      return [];
+    }
+
+    const rows = await getSlaRows(connection);
+    if (!rows.length) return [];
+
+    const counts = {
+      "Within SLA": rows.filter((ticket) => ticket.compliant && !ticket.atRisk).length,
+      "At Risk": rows.filter((ticket) => ticket.atRisk).length,
+      "Breached": rows.filter((ticket) => ticket.breached).length
+    };
+
+    return Object.entries(counts)
+      .filter(([, value]) => value > 0)
+      .map(([label, value]) => ({ label, value }));
+  } catch (error) {
+    console.error(`[oracle] SLA distribution query failed: ${error}`);
+    throw error;
+  } finally {
+    await connection.close();
+  }
+}
+
+export async function getAssetStatus() {
+  const connection = await getConnection();
+  try {
+    const hasAssets = await tableExists(connection, "ASSETS");
+    if (!hasAssets) {
+      return [];
+    }
+
+    const result = await connection.execute(
+      `SELECT NVL(status, 'Unknown') AS label, COUNT(*) AS value
+       FROM assets
+       GROUP BY NVL(status, 'Unknown')
+       ORDER BY value DESC`
+    );
+
+    return ((result.rows || []) as Array<Record<string, unknown>>).map((row) => ({
+      label: String(row.LABEL || "Unknown"),
+      value: Number(row.VALUE || 0)
+    }));
+  } catch (error) {
+    console.error(`[oracle] Asset status query failed: ${error}`);
+    throw error;
+  } finally {
+    await connection.close();
+  }
+}
+
+export async function getDepartmentDistribution() {
+  const connection = await getConnection();
+  try {
+    const hasTickets = await tableExists(connection, "TICKETS");
+    if (!hasTickets) {
+      return [];
+    }
+
+    const result = await connection.execute(
+      `SELECT NVL(department, 'Unknown') AS label, COUNT(*) AS value
+       FROM tickets
+       GROUP BY NVL(department, 'Unknown')
+       ORDER BY value DESC`
+    );
+
+    return ((result.rows || []) as Array<Record<string, unknown>>).map((row) => ({
+      label: String(row.LABEL || "Unknown"),
+      value: Number(row.VALUE || 0)
+    }));
+  } catch (error) {
+    console.error(`[oracle] Department distribution query failed: ${error}`);
+    throw error;
+  } finally {
+    await connection.close();
+  }
+}
+
+export async function getEngineerPerformance() {
+  const connection = await getConnection();
+  try {
+    const hasTickets = await tableExists(connection, "TICKETS");
+    const hasUsers = await tableExists(connection, "USERS");
+    if (!hasTickets || !hasUsers) {
+      return [];
+    }
+
+    const result = await connection.execute(
+      `SELECT u.username AS engineer_name, COUNT(t.id) AS resolved_ticket_count
+       FROM users u
+       JOIN tickets t ON t.assigned_to = u.id
+       WHERE u.role = 'engineer'
+         AND t.status IN ('resolved', 'closed')
+       GROUP BY u.username
+       ORDER BY resolved_ticket_count DESC`
+    );
+
+    const rows = (result.rows || []) as Array<Record<string, unknown>>;
+    const totalResolved = rows.reduce((sum, row) => sum + Number(row.RESOLVED_TICKET_COUNT || 0), 0);
+
+    return rows.map((row) => {
+      const engineerName = String(row.ENGINEER_NAME || "Unknown");
+      const resolvedCount = Number(row.RESOLVED_TICKET_COUNT || 0);
+      const percentage = totalResolved > 0 ? Math.round((resolvedCount / totalResolved) * 100) : 0;
+      return {
+        engineerName,
+        resolvedTicketCount: resolvedCount,
+        percentageContribution: percentage
+      };
+    });
+  } catch (error) {
+    console.error(`[oracle] Engineer performance query failed: ${error}`);
+    throw error;
   } finally {
     await connection.close();
   }

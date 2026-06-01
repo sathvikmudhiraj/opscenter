@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Bell } from "lucide-react";
 import { api } from "@/lib/api";
+import { useNotificationMetrics } from "@/components/notifications/NotificationMetricsProvider";
 
 type Notification = { id: number; title: string; body: string; readAt: string | null; createdAt: string };
 
@@ -10,6 +11,7 @@ export function NotificationBell() {
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<Notification[]>([]);
   const containerRef = useRef<HTMLDivElement>(null);
+  const { unreadCount } = useNotificationMetrics();
 
   useEffect(() => {
     api.get<{ data: Notification[] }>("/notifications").then(({ data }) => setItems(data.data)).catch(() => setItems([]));
@@ -23,8 +25,6 @@ export function NotificationBell() {
     return () => document.removeEventListener("mousedown", closeOnOutsideClick);
   }, [open]);
 
-  const unread = items.filter((item) => !item.readAt).length;
-
   return (
     <div className="relative z-50 self-start sm:self-auto" ref={containerRef}>
       <button
@@ -35,9 +35,9 @@ export function NotificationBell() {
         aria-expanded={open}
       >
         <Bell className="h-5 w-5" aria-hidden="true" />
-        {unread ? (
+        {unreadCount ? (
           <span className="absolute -right-2 -top-2 z-10 flex h-5 min-w-5 items-center justify-center rounded-full border-2 border-white bg-red-600 px-1 text-[10px] font-bold leading-none text-white">
-            {unread > 99 ? "99+" : unread}
+            {unreadCount > 99 ? "99+" : unreadCount}
           </span>
         ) : null}
       </button>

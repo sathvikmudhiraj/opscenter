@@ -1,18 +1,68 @@
 import { getConnection } from "../config/database";
 import { writeAuditLog } from "./audit.service";
+import { EventEmitter } from "events";
+
+export const notificationEvents = new EventEmitter();
+notificationEvents.setMaxListeners(100);
 
 async function getNotificationColumns(connection: any) {
   const result = await connection.execute(
-    `SELECT column_name FROM user_tab_columns WHERE table_name = 'NOTIFICATIONS'`
+    `SELECT column_name, data_type FROM user_tab_columns WHERE table_name = 'NOTIFICATIONS'`
   );
-  const columns = new Set(((result.rows || []) as Array<{ COLUMN_NAME: string }>).map((row) => row.COLUMN_NAME));
+  const rows = (result.rows || []) as Array<{ COLUMN_NAME: string; DATA_TYPE: string }>;
+  const columns = new Set(rows.map((row) => row.COLUMN_NAME));
+  const isReadColumn = rows.find((row) => row.COLUMN_NAME === "IS_READ");
+  const isReadDataType = isReadColumn?.DATA_TYPE || "";
   return {
     hasTable: columns.size > 0,
     messageColumn: columns.has("BODY") ? "body" : "message",
     hasReadAt: columns.has("READ_AT"),
     hasIsRead: columns.has("IS_READ"),
+    isReadIsCharacter: ["CHAR", "NCHAR", "VARCHAR2", "NVARCHAR2"].includes(isReadDataType),
     hasType: columns.has("TYPE")
   };
+}
+
+function isUnreadValue(value: unknown) {
+  if (value === null || value === undefined) return true;
+  const normalized = String(value).trim().toUpperCase();
+  return normalized === "N" || normalized === "0" || normalized === "FALSE";
+}
+
+function isReadValue(value: unknown) {
+  return !isUnreadValue(value);
+}
+
+function emitNotificationMetricsChanged() {
+  setTimeout(() => notificationEvents.emit("changed"), 250);
+}
+
+export async function getUnreadNotificationCount() {
+  const connection = await getConnection();
+  try {
+    const columns = await getNotificationColumns(connection);
+    if (!columns.hasTable) return 0;
+    if (columns.hasIsRead) {
+      const result = await connection.execute(
+        `SELECT COUNT(*)
+         AS unread_count
+         FROM NOTIFICATIONS
+         WHERE UPPER(TRIM(TO_CHAR(IS_READ))) IN ('N', '0', 'FALSE')`
+      );
+      return Number(((result.rows || [])[0] as { UNREAD_COUNT?: number })?.UNREAD_COUNT || 0);
+    }
+    if (columns.hasReadAt) {
+      const result = await connection.execute(
+        `SELECT COUNT(*) AS unread_count
+         FROM notifications
+         WHERE read_at IS NULL`
+      );
+      return Number(((result.rows || [])[0] as { UNREAD_COUNT?: number })?.UNREAD_COUNT || 0);
+    }
+    return 0;
+  } finally {
+    await connection.close();
+  }
 }
 
 export async function createNotification(input: { userId: number; title: string; body?: string }, connection?: any) {
@@ -21,14 +71,17 @@ export async function createNotification(input: { userId: number; title: string;
   try {
     const columns = await getNotificationColumns(activeConnection);
     if (!columns.hasTable) return;
+    const readColumn = columns.hasIsRead ? ", is_read" : "";
+    const readValue = columns.hasIsRead ? ", :isRead" : "";
     const typeColumns = columns.hasType ? ", type" : "";
     const typeValues = columns.hasType ? ", 'system'" : "";
     await activeConnection.execute(
-      `INSERT INTO notifications (user_id, title, ${columns.messageColumn}${typeColumns})
-       VALUES (:userId, :title, :body${typeValues})`,
-      { userId: input.userId, title: input.title, body: input.body || null }
+      `INSERT INTO notifications (user_id, title, ${columns.messageColumn}${readColumn}${typeColumns})
+       VALUES (:userId, :title, :body${readValue}${typeValues})`,
+      { userId: input.userId, title: input.title, body: input.body || null, isRead: columns.isReadIsCharacter ? "N" : 0 }
     );
     if (shouldClose) await activeConnection.commit();
+    emitNotificationMetricsChanged();
   } catch (error) {
     if (shouldClose) await activeConnection.rollback();
     throw error;
@@ -56,26 +109,30 @@ export async function listNotifications(input: { userId: number }) {
   try {
     const columns = await getNotificationColumns(connection);
     if (!columns.hasTable) return [];
-    const readSelect = columns.hasReadAt ? "read_at" : columns.hasIsRead ? "is_read" : "0 AS is_read";
+    const readAtSelect = columns.hasReadAt ? "read_at" : "NULL AS read_at";
+    const isReadSelect = columns.hasIsRead ? "is_read" : columns.hasReadAt ? "CASE WHEN read_at IS NULL THEN 'N' ELSE 'Y' END AS is_read" : "'Y' AS is_read";
     const result = await connection.execute(
-      `SELECT id, user_id, title, ${columns.messageColumn} AS body, ${readSelect}, created_at
+      `SELECT id, user_id, title, ${columns.messageColumn} AS body, ${readAtSelect}, ${isReadSelect}, created_at
        FROM notifications
        WHERE user_id = :userId
        ORDER BY created_at DESC`,
       input
     );
-    return ((result.rows || []) as Array<any>).map((item) => ({
-      id: item.ID,
-      user_id: item.USER_ID,
-      userId: item.USER_ID,
-      title: item.TITLE,
-      body: item.BODY || "",
-      message: item.BODY || "",
-      readAt: item.READ_AT || (item.IS_READ ? item.CREATED_AT : null),
-      isRead: Boolean(item.READ_AT || item.IS_READ),
-      createdAt: item.CREATED_AT,
-      created_at: item.CREATED_AT
-    }));
+    return ((result.rows || []) as Array<any>).map((item) => {
+      const read = isReadValue(item.IS_READ);
+      return {
+        id: item.ID,
+        user_id: item.USER_ID,
+        userId: item.USER_ID,
+        title: item.TITLE,
+        body: item.BODY || "",
+        message: item.BODY || "",
+        readAt: item.READ_AT || (read ? item.CREATED_AT : null),
+        isRead: read,
+        createdAt: item.CREATED_AT,
+        created_at: item.CREATED_AT
+      };
+    });
   } finally {
     await connection.close();
   }
@@ -86,14 +143,18 @@ export async function markNotificationRead(input: { id: number; userId: number }
   try {
     const columns = await getNotificationColumns(connection);
     if (!columns.hasTable) return;
-    const setSql = columns.hasReadAt ? "read_at = COALESCE(read_at, CURRENT_TIMESTAMP)" : columns.hasIsRead ? "is_read = 1" : "id = id";
+    const updates = [];
+    if (columns.hasIsRead) updates.push("is_read = :isRead");
+    if (columns.hasReadAt) updates.push("read_at = COALESCE(read_at, CURRENT_TIMESTAMP)");
+    const setSql = updates.length ? updates.join(", ") : "id = id";
     await connection.execute(
       `UPDATE notifications
        SET ${setSql}
        WHERE id = :id AND user_id = :userId`,
-      input
+      { ...input, isRead: columns.isReadIsCharacter ? "Y" : 1 }
     );
     await connection.commit();
+    emitNotificationMetricsChanged();
   } catch (error) {
     await connection.rollback();
     throw error;
@@ -107,14 +168,18 @@ export async function markAllNotificationsRead(input: { userId: number }) {
   try {
     const columns = await getNotificationColumns(connection);
     if (!columns.hasTable) return;
-    const setSql = columns.hasReadAt ? "read_at = COALESCE(read_at, CURRENT_TIMESTAMP)" : columns.hasIsRead ? "is_read = 1" : "id = id";
+    const updates = [];
+    if (columns.hasIsRead) updates.push("is_read = :isRead");
+    if (columns.hasReadAt) updates.push("read_at = COALESCE(read_at, CURRENT_TIMESTAMP)");
+    const setSql = updates.length ? updates.join(", ") : "id = id";
     await connection.execute(
       `UPDATE notifications
        SET ${setSql}
        WHERE user_id = :userId`,
-      input
+      { ...input, isRead: columns.isReadIsCharacter ? "Y" : 1 }
     );
     await connection.commit();
+    emitNotificationMetricsChanged();
   } catch (error) {
     await connection.rollback();
     throw error;

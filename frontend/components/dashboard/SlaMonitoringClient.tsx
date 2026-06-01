@@ -7,16 +7,19 @@ import { api } from "@/lib/api";
 import { KpiCard } from "./KpiCard";
 import { StatusBadge } from "@/components/tickets/StatusBadge";
 
-type PriorityMetric = { priority: string; total: number; breaches: number; atRisk: number; compliance: number };
+type PriorityMetric = { priority: string; total: number; withinSla?: number; breaches: number; atRisk: number; compliance: number };
 type BreachRiskTicket = { id: number; title: string; priority: string; assignedEngineer: string; slaRemaining: string; status: string };
 type EngineerPerformance = { engineer: string; assignedTickets: number; resolvedTickets: number; compliance: number };
 type TrendPoint = { label: string; value: number };
 type SlaReport = {
   stats: {
-    slaCompliance: number;
+    slaCompliance: number | null;
+    withinSla: number;
     breaches: number;
     atRisk: number;
-    averageResponseTimeMinutes: number;
+    averageResolutionTimeMinutes: number | null;
+    averageResponseTimeMinutes?: number | null;
+    trackableTickets: number;
   };
   priorityMetrics: PriorityMetric[];
   breachRiskQueue: BreachRiskTicket[];
@@ -25,7 +28,7 @@ type SlaReport = {
 };
 
 const emptyReport: SlaReport = {
-  stats: { slaCompliance: 100, breaches: 0, atRisk: 0, averageResponseTimeMinutes: 0 },
+  stats: { slaCompliance: null, withinSla: 0, breaches: 0, atRisk: 0, averageResolutionTimeMinutes: null, averageResponseTimeMinutes: null, trackableTickets: 0 },
   priorityMetrics: [],
   breachRiskQueue: [],
   engineerPerformance: [],
@@ -69,10 +72,22 @@ export function SlaMonitoringClient() {
   return (
     <div className="space-y-5">
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <KpiCard label="Overall SLA Compliance" value={`${report.stats.slaCompliance}%`} detail="Tickets meeting SLA targets" icon={ShieldCheck} tone="green" />
+        <KpiCard
+          label="Overall SLA Compliance"
+          value={report.stats.trackableTickets ? `${report.stats.slaCompliance ?? 0}%` : "0%"}
+          detail={`${report.stats.withinSla} within SLA of ${report.stats.trackableTickets} tickets`}
+          icon={ShieldCheck}
+          tone="green"
+        />
         <KpiCard label="SLA Breaches" value={String(report.stats.breaches)} detail="Tickets past SLA deadline" icon={AlertTriangle} tone="amber" />
         <KpiCard label="Tickets At Risk" value={String(report.stats.atRisk)} detail="Active tickets nearing breach" icon={Gauge} tone="amber" />
-        <KpiCard label="Average Response Time" value={`${report.stats.averageResponseTimeMinutes}m`} detail="Created to latest response" icon={Clock3} tone="cyan" />
+        <KpiCard
+          label="Average Resolution Time"
+          value={report.stats.averageResolutionTimeMinutes === null ? "0m" : `${report.stats.averageResolutionTimeMinutes}m`}
+          detail={report.stats.averageResolutionTimeMinutes === null ? "No resolved tickets yet" : "Created to resolved timestamp"}
+          icon={Clock3}
+          tone="cyan"
+        />
       </div>
 
       <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
@@ -90,10 +105,9 @@ export function SlaMonitoringClient() {
                 <StatusBadge status={metric.priority} />
               </div>
               <p className="mt-3 text-2xl font-semibold text-slate-950">{metric.compliance}%</p>
-              <p className="mt-1 text-sm text-slate-600">{metric.total} tickets, {metric.breaches} breaches, {metric.atRisk} at risk</p>
+              <p className="mt-1 text-sm text-slate-600">{metric.total} tickets, {metric.withinSla || 0} within SLA, {metric.breaches} breaches, {metric.atRisk} at risk</p>
             </article>
           ))}
-          {!report.priorityMetrics.length ? <EmptyState message="No priority SLA data is available yet." /> : null}
         </div>
       </section>
 
@@ -110,7 +124,7 @@ export function SlaMonitoringClient() {
                 <Line type="monotone" dataKey="value" stroke="#1d4ed8" strokeWidth={2} dot={{ r: 3 }} />
               </LineChart>
             </ResponsiveContainer>
-          ) : <EmptyState message="No SLA trend data is available yet." />}
+          ) : <EmptyState message="No ticket history is available yet." />}
         </div>
       </section>
 

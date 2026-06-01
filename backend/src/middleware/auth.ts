@@ -6,7 +6,8 @@ import { HttpError } from "../utils/httpError";
 
 export function requireAuth(req: Request, _res: Response, next: NextFunction) {
   const header = req.headers.authorization;
-  const token = header?.startsWith("Bearer ") ? header.slice(7) : null;
+  const queryToken = typeof req.query.token === "string" ? req.query.token : null;
+  const token = header?.startsWith("Bearer ") ? header.slice(7) : queryToken;
   console.info(`[auth] Token ${token ? "received" : "missing"} for ${req.method} ${req.path}`);
   if (!token) throw new HttpError(401, "Authentication token required");
 

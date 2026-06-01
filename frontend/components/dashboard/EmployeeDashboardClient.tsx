@@ -11,6 +11,7 @@ import type { Ticket } from "@/types/ticket";
 import { KpiCard } from "./KpiCard";
 import { EmployeeMyTickets } from "@/components/tickets/EmployeeMyTickets";
 import { StatusBadge } from "@/components/tickets/StatusBadge";
+import { useNotificationMetrics } from "@/components/notifications/NotificationMetricsProvider";
 
 type DashboardFilter = "all" | "open" | "active" | "sla" | "closed";
 type Asset = { id: number; assetTag: string; assetName?: string; category?: string; type: string; status: string; assignedToLogin?: string; warrantyExpiry?: string };
@@ -25,6 +26,7 @@ export function EmployeeDashboardClient() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const user = getSessionUser();
+  const { unreadCount } = useNotificationMetrics();
 
   async function load() {
     setLoading(true);
@@ -62,7 +64,6 @@ export function EmployeeDashboardClient() {
   const activeTickets = mine.filter((ticket) => !["resolved", "closed"].includes(ticket.status));
   const slaRisk = mine.filter((ticket) => ticket.priority === "critical" || ticket.slaRisk === "high" || ticket.status === "escalated");
   const closedTickets = mine.filter((ticket) => ["resolved", "closed"].includes(ticket.status));
-  const unread = notifications.filter((item) => !item.readAt).length;
   const avgResponse = activeTickets.length ? `${Math.max(15, activeTickets.length * 12)}m` : "0m";
   const statusChartData = [
     { name: "Open", value: mine.filter((ticket) => ticket.status === "open").length },
@@ -171,7 +172,7 @@ export function EmployeeDashboardClient() {
           <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
             <div className="flex items-center justify-between">
               <h2 className="text-base font-semibold text-slate-950">Notifications</h2>
-              <span className="inline-flex items-center gap-2 rounded-md bg-blue-50 px-2 py-1 text-xs font-semibold text-blue-700"><Bell className="h-3 w-3" />{unread} unread</span>
+              <span className="inline-flex items-center gap-2 rounded-md bg-blue-50 px-2 py-1 text-xs font-semibold text-blue-700"><Bell className="h-3 w-3" />{unreadCount} unread</span>
             </div>
             <div className="mt-4 space-y-3">
               {notifications.slice(0, 3).map((item) => (

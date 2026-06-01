@@ -1,6 +1,6 @@
 "use client";
 
-import { BarChart3, Bell, Boxes, ClipboardList, FileBarChart, FileClock, Gauge, HardHat, History, KeyRound, LogOut, Settings, UserCog } from "lucide-react";
+import { BarChart3, Bell, Boxes, ClipboardList, FileBarChart, FileClock, Gauge, HardHat, History, KeyRound, LogOut, Network, Settings, UserCog } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { clearSession } from "@/lib/auth";
@@ -31,6 +31,7 @@ export const roleItems = {
     { href: "/admin/sla", label: "SLA Monitoring", icon: Gauge },
     { href: "/admin/notifications", label: "Notifications", icon: Bell },
     { href: "/admin/reports", label: "Reports & Analytics", icon: FileBarChart },
+    { href: "/admin/infrastructure", label: "Infrastructure Monitoring", icon: Network },
     { href: "/admin/audit-logs", label: "Audit Logs", icon: History },
     { href: "/admin/settings", label: "Settings", icon: Settings }
   ]
