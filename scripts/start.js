@@ -1,4 +1,5 @@
 const net = require("net");
+const os = require("os");
 const { execFileSync } = require("child_process");
 const concurrently = require("concurrently");
 
@@ -50,6 +51,16 @@ function stopWorkspaceProcesses() {
   }
 }
 
+function getLanIp() {
+  const interfaces = os.networkInterfaces();
+  for (const entries of Object.values(interfaces)) {
+    for (const entry of entries || []) {
+      if (entry.family === "IPv4" && !entry.internal) return entry.address;
+    }
+  }
+  return "localhost";
+}
+
 async function main() {
   stopWorkspaceProcesses();
   await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -61,8 +72,14 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(`[start] Frontend: http://localhost:${frontendPort}`);
-  console.log(`[start] Backend:  http://localhost:${backendPort}/api`);
+  const lanIp = getLanIp();
+  const frontendUrl = `http://${lanIp}:${frontendPort}`;
+  const apiUrl = `http://${lanIp}:${backendPort}`;
+
+  console.log(`[start] Frontend local:  http://localhost:${frontendPort}`);
+  console.log(`[start] Frontend network: ${frontendUrl}`);
+  console.log(`[start] Backend local:   http://localhost:${backendPort}/api`);
+  console.log(`[start] Backend network: ${apiUrl}/api`);
 
   const { result } = concurrently(
     [
@@ -70,13 +87,13 @@ async function main() {
         command: "npm run start --workspace @opscenter/backend",
         name: "backend",
         prefixColor: "green",
-        env: { PORT: String(backendPort), FRONTEND_URL: `http://localhost:${frontendPort}` }
+        env: { PORT: String(backendPort), HOST: "0.0.0.0", FRONTEND_URL: frontendUrl }
       },
       {
         command: "npm run start --workspace @opscenter/frontend",
         name: "frontend",
         prefixColor: "cyan",
-        env: { PORT: String(frontendPort), NEXT_PUBLIC_API_URL: `http://localhost:${backendPort}` }
+        env: { PORT: String(frontendPort), NEXT_PUBLIC_API_URL: apiUrl }
       }
     ],
     {

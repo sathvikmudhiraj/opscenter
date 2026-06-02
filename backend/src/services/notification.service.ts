@@ -1,6 +1,7 @@
 import { getConnection } from "../config/database";
 import { writeAuditLog } from "./audit.service";
 import { EventEmitter } from "events";
+import { getSystemSettings } from "./settings.service";
 
 export const notificationEvents = new EventEmitter();
 notificationEvents.setMaxListeners(100);
@@ -37,7 +38,29 @@ function emitNotificationMetricsChanged() {
   setTimeout(() => notificationEvents.emit("changed"), 250);
 }
 
+type NotificationCategory =
+  | "ticketAssignment"
+  | "ticketResolution"
+  | "slaBreach"
+  | "assetAssignment"
+  | "assetRequest"
+  | "serviceOutage"
+  | "system";
+
+async function notificationAllowed(category: NotificationCategory = "system") {
+  const settings = await getSystemSettings();
+  if (!settings.notifications.inAppEnabled) return false;
+  if (category === "ticketAssignment") return settings.notifications.ticketAssignmentAlerts;
+  if (category === "ticketResolution") return settings.notifications.ticketResolutionAlerts;
+  if (category === "slaBreach") return settings.notifications.slaBreachAlerts;
+  if (category === "assetAssignment") return settings.notifications.assetAssignmentAlerts;
+  if (category === "assetRequest") return settings.notifications.assetRequestAlerts;
+  if (category === "serviceOutage") return settings.notifications.serviceOutageAlerts;
+  return true;
+}
+
 export async function getUnreadNotificationCount() {
+  if (!(await notificationAllowed())) return 0;
   const connection = await getConnection();
   try {
     const columns = await getNotificationColumns(connection);
@@ -65,7 +88,8 @@ export async function getUnreadNotificationCount() {
   }
 }
 
-export async function createNotification(input: { userId: number; title: string; body?: string }, connection?: any) {
+export async function createNotification(input: { userId: number; title: string; body?: string; category?: NotificationCategory }, connection?: any) {
+  if (!(await notificationAllowed(input.category))) return;
   const activeConnection = connection || await getConnection();
   const shouldClose = !connection;
   try {
@@ -90,7 +114,8 @@ export async function createNotification(input: { userId: number; title: string;
   }
 }
 
-export async function notifyAdmins(input: { title: string; body?: string }, connection: any) {
+export async function notifyAdmins(input: { title: string; body?: string; category?: NotificationCategory }, connection: any) {
+  if (!(await notificationAllowed(input.category))) return;
   const userColumnsResult = await connection.execute(
     `SELECT column_name FROM user_tab_columns WHERE table_name = 'USERS'`
   );
@@ -100,11 +125,12 @@ export async function notifyAdmins(input: { title: string; body?: string }, conn
     `SELECT id FROM users WHERE role = 'admin' ${statusFilter}`
   );
   for (const admin of (result.rows || []) as Array<{ ID: number }>) {
-    await createNotification({ userId: admin.ID, title: input.title, body: input.body }, connection);
+    await createNotification({ userId: admin.ID, title: input.title, body: input.body, category: input.category }, connection);
   }
 }
 
 export async function listNotifications(input: { userId: number }) {
+  if (!(await notificationAllowed())) return [];
   const connection = await getConnection();
   try {
     const columns = await getNotificationColumns(connection);

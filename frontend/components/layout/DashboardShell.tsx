@@ -1,19 +1,11 @@
 "use client";
 
-import { useEffect } from "react";
 import type { UserRole } from "@/types/auth";
 import { MobileNav, Sidebar } from "./Sidebar";
 import { RoleGuard } from "./RoleGuard";
 import { NotificationBell } from "./NotificationBell";
-import { useNotificationMetrics } from "@/components/notifications/NotificationMetricsProvider";
 
 export function DashboardShell({ role, title, subtitle, children, hideNotifications = false }: { role: UserRole; title: string; subtitle: string; children: React.ReactNode; hideNotifications?: boolean }) {
-  const { refreshUnreadCount } = useNotificationMetrics();
-
-  useEffect(() => {
-    refreshUnreadCount().catch(() => undefined);
-  }, [refreshUnreadCount]);
-
   return (
     <RoleGuard role={role}>
       <div className="min-h-screen bg-[#eef3f8] lg:flex">

@@ -93,9 +93,14 @@ export function InfrastructureMonitoringPage() {
   const [reports, setReports] = useState<ReportRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [refreshMs, setRefreshMs] = useState(60000);
 
   async function load(selectedRange = range) {
-    if (!getSessionToken()) return;
+    if (!getSessionToken()) {
+      setError("");
+      setLoading(false);
+      return;
+    }
     try {
       const [currentResp, historyResp, heatmapResp, incidentsResp, reportsResp] = await Promise.all([
         api.get<{ data: ServiceHealth[] }>("/infrastructure/current"),
@@ -122,13 +127,22 @@ export function InfrastructureMonitoringPage() {
     async function guardedLoad() {
       if (active) await load();
     }
+    api.get<{ data?: { infrastructure?: { monitoringIntervalSeconds?: number } } }>("/settings")
+      .then(({ data }) => {
+        const seconds = Number(data.data?.infrastructure?.monitoringIntervalSeconds || 60);
+        if (active) setRefreshMs(Math.max(10000, seconds * 1000));
+      })
+      .catch(() => undefined);
     guardedLoad();
-    const refresh = window.setInterval(guardedLoad, 60000);
     return () => {
       active = false;
-      window.clearInterval(refresh);
     };
   }, []);
+
+  useEffect(() => {
+    const refresh = window.setInterval(() => load(range), refreshMs);
+    return () => window.clearInterval(refresh);
+  }, [refreshMs, range]);
 
   useEffect(() => {
     setLoading(true);
@@ -190,6 +204,7 @@ export function InfrastructureMonitoringPage() {
         {serviceOrder.map((key) => (
           <ServiceDashboard
             key={key}
+            serviceKey={key}
             service={current.find((item) => item.key === key)}
             history={historyByService[key] || []}
             range={range}
@@ -250,8 +265,8 @@ function OverviewCard({ label, value, icon: Icon, tone = "blue" }: { label: stri
   );
 }
 
-function ServiceDashboard({ service, history, range, loading }: { service?: ServiceHealth; history: HistoryPoint[]; range: RangeKey; loading: boolean }) {
-  const key = service?.key || "network-health";
+function ServiceDashboard({ serviceKey, service, history, range, loading }: { serviceKey: ServiceKey; service?: ServiceHealth; history: HistoryPoint[]; range: RangeKey; loading: boolean }) {
+  const key = service?.key || serviceKey;
   const Icon = icons[key];
   const chartData = history.map((point) => ({
     label: new Date(point.checkedAt).toLocaleDateString([], range === "24h" ? { hour: "2-digit", minute: "2-digit" } : { month: "short", day: "numeric" }),

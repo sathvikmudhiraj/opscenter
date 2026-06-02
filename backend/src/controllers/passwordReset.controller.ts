@@ -25,7 +25,7 @@ export const getResetRequests = asyncHandler(async (_req, res) => {
 });
 
 export const generateResetPassword = asyncHandler(async (_req, res) => {
-  res.json({ data: { temporaryPassword: generateTemporaryPassword() } });
+  res.json({ data: { temporaryPassword: await generateTemporaryPassword() } });
 });
 
 export const patchResetStatus = asyncHandler(async (req, res) => {

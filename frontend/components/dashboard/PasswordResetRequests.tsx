@@ -15,15 +15,36 @@ type ResetRequest = {
   status: "PENDING" | "APPROVED" | "REJECTED" | "COMPLETED";
 };
 
+type PasswordPolicy = {
+  minimumPasswordLength: number;
+  requireUppercase: boolean;
+  requireLowercase: boolean;
+  requireNumbers: boolean;
+  requireSpecialCharacters: boolean;
+};
+
+const fallbackPolicy: PasswordPolicy = {
+  minimumPasswordLength: 8,
+  requireUppercase: true,
+  requireLowercase: true,
+  requireNumbers: true,
+  requireSpecialCharacters: false
+};
+
 export function PasswordResetRequests() {
   const [requests, setRequests] = useState<ResetRequest[]>([]);
   const [message, setMessage] = useState("");
   const [resetting, setResetting] = useState<ResetRequest | null>(null);
   const [passwords, setPasswords] = useState({ temporaryPassword: "", confirmPassword: "" });
+  const [policy, setPolicy] = useState<PasswordPolicy>(fallbackPolicy);
 
   async function load() {
-    const { data } = await api.get<{ data: ResetRequest[] }>("/password-resets");
+    const [{ data }, settings] = await Promise.all([
+      api.get<{ data: ResetRequest[] }>("/password-resets"),
+      api.get<{ data?: { security?: Partial<PasswordPolicy> } }>("/settings").catch(() => ({ data: { data: { security: fallbackPolicy } } }))
+    ]);
     setRequests(data.data || []);
+    setPolicy({ ...fallbackPolicy, ...(settings.data.data?.security || {}) });
   }
 
   useEffect(() => {
@@ -46,6 +67,11 @@ export function PasswordResetRequests() {
     event.preventDefault();
     if (!resetting) return;
     setMessage("");
+    const validation = validateTemporaryPassword(passwords.temporaryPassword, passwords.confirmPassword, policy);
+    if (validation) {
+      setMessage(validation);
+      return;
+    }
     try {
       await api.post(`/password-resets/${resetting.id}/complete`, passwords);
       setMessage(`${resetting.username} password reset completed. Temporary password: ${passwords.temporaryPassword}`);
@@ -110,6 +136,7 @@ export function PasswordResetRequests() {
             <div className="mt-5 space-y-4">
               <Field label="Temporary Password" value={passwords.temporaryPassword} onChange={(temporaryPassword) => setPasswords({ ...passwords, temporaryPassword })} />
               <Field label="Confirm Password" value={passwords.confirmPassword} onChange={(confirmPassword) => setPasswords({ ...passwords, confirmPassword })} />
+              <p className="rounded-md bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-600">{policyText(policy)}</p>
             </div>
             <button className="mt-6 inline-flex w-full items-center justify-center gap-2 rounded-md bg-blue-700 px-4 py-3 text-sm font-semibold text-white hover:bg-blue-800">
               <KeyRound className="h-4 w-4" />
@@ -120,6 +147,25 @@ export function PasswordResetRequests() {
       ) : null}
     </section>
   );
+}
+
+function validateTemporaryPassword(password: string, confirmPassword: string, policy: PasswordPolicy) {
+  if (password !== confirmPassword) return "Passwords must match.";
+  if (password.length < policy.minimumPasswordLength) return `Password must be at least ${policy.minimumPasswordLength} characters.`;
+  if (policy.requireUppercase && !/[A-Z]/.test(password)) return "Password must include an uppercase letter.";
+  if (policy.requireLowercase && !/[a-z]/.test(password)) return "Password must include a lowercase letter.";
+  if (policy.requireNumbers && !/[0-9]/.test(password)) return "Password must include a number.";
+  if (policy.requireSpecialCharacters && !/[^A-Za-z0-9]/.test(password)) return "Password must include a special character.";
+  return "";
+}
+
+function policyText(policy: PasswordPolicy) {
+  const requirements = [`${policy.minimumPasswordLength}+ characters`];
+  if (policy.requireUppercase) requirements.push("uppercase");
+  if (policy.requireLowercase) requirements.push("lowercase");
+  if (policy.requireNumbers) requirements.push("number");
+  if (policy.requireSpecialCharacters) requirements.push("special character");
+  return `Password policy: ${requirements.join(", ")}.`;
 }
 
 function Field({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {

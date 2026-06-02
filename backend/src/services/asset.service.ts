@@ -2,6 +2,7 @@ import oracledb from "oracledb";
 import { getConnection } from "../config/database";
 import { writeAuditLog } from "./audit.service";
 import { createNotification, notifyAdmins } from "./notification.service";
+import { getSystemSettings } from "./settings.service";
 
 type AssetInput = {
   assetTag: string;
@@ -111,13 +112,26 @@ function selectIf(columns: Set<string>, column: string, fallback = "NULL") {
   return columns.has(column.toUpperCase()) ? `a.${column}` : `${fallback} AS ${column}`;
 }
 
-export async function listAssets() {
+export async function listAssets(input: { assignedToUserId?: number; requester?: { id: number; username?: string; email?: string } } = {}) {
   const connection = await getConnection();
   try {
     const assetColumns = await getAssetColumns(connection);
     const userColumns = await getUserColumns(connection);
     const assignedSelect = assetColumns.assignedColumn ? `a.${assetColumns.assignedColumn}` : "NULL";
     const assignedJoin = assetColumns.assignedColumn ? `LEFT JOIN users u ON u.id = a.${assetColumns.assignedColumn}` : "";
+    const binds: Record<string, unknown> = {};
+    const where = input.assignedToUserId && assetColumns.assignedColumn
+      ? `WHERE a.${assetColumns.assignedColumn} = :assignedToUserId`
+      : "";
+    if (input.assignedToUserId && assetColumns.assignedColumn) {
+      binds.assignedToUserId = input.assignedToUserId;
+    }
+    console.info("[assets] Retrieval context", {
+      requestedAssignedToUserId: input.assignedToUserId || null,
+      loggedInEmployeeIdentifier: input.requester || null,
+      assetAssignedColumn: assetColumns.assignedColumn || null,
+      queryFilter: where || "none"
+    });
     const result = await connection.execute(
       `SELECT a.id,
               a.asset_tag,
@@ -146,10 +160,21 @@ export async function listAssets() {
               ${assetColumns.assignedColumn ? `u.${userColumns.usernameColumn}` : "NULL"} AS assigned_to_login
        FROM assets a
        ${assignedJoin}
+       ${where}
        ORDER BY a.created_at DESC, a.asset_tag`
+      , binds
     );
-    console.info("[oracle] Assets query success");
-    return ((result.rows || []) as Array<any>).map(normalizeAsset);
+    const assets = ((result.rows || []) as Array<any>).map(normalizeAsset);
+    console.info("[assets] Query success", {
+      count: assets.length,
+      assignedIdentifiers: assets.map((asset) => ({
+        assetTag: asset.assetTag,
+        assignedTo: asset.assignedTo,
+        assignedToLogin: asset.assignedToLogin,
+        assignedToName: asset.assignedToName
+      }))
+    });
+    return assets;
   } catch (error) {
     console.info(`[oracle] Assets query failed: ${error instanceof Error ? error.message : "unknown error"}`);
     throw error;
@@ -162,9 +187,11 @@ export async function createAsset(input: AssetInput & { actorId: number }) {
   const connection = await getConnection();
   try {
     const assetColumns = await getAssetColumns(connection);
+    const settings = await getSystemSettings();
+    const assetTag = input.assetTag || (settings.assets.autoAssetIdGeneration ? `AST-${Date.now().toString().slice(-6)}` : input.assetTag);
     const location = assetLocation(input);
     const values: Array<[string, string, unknown]> = [
-      ["asset_tag", "assetTag", input.assetTag],
+      ["asset_tag", "assetTag", assetTag],
       ["asset_name", "assetName", input.assetName],
       ["category", "category", input.category],
       ["status", "status", input.status || statusFromLifecycle(input.lifecycleState)]
@@ -192,6 +219,11 @@ export async function createAsset(input: AssetInput & { actorId: number }) {
     }
 
     if (assetColumns.assignedColumn) {
+      console.info("[assets] Create assignment context", {
+        assignedIdentifierField: assetColumns.assignedColumn,
+        assignedIdentifierValue: input.assignedTo || null,
+        actorId: input.actorId
+      });
       values.push([assetColumns.assignedColumn, "assignedTo", input.assignedTo || null]);
     }
 
@@ -214,10 +246,10 @@ export async function createAsset(input: AssetInput & { actorId: number }) {
 
     console.info("[oracle] Asset insert columns", [...values.map(([column]) => column), ...dateValues.map(([column]) => column)].join(", "));
     const result = await connection.execute(sql, binds);
-    await writeAuditLog({ userId: input.actorId, action: "asset_created", details: `${input.assetTag} created.` }, connection);
+    await writeAuditLog({ userId: input.actorId, action: "asset_created", details: `${assetTag} created.` }, connection);
     await connection.commit();
     console.info("[oracle] Asset insert success");
-    return { id: Number(result.outBinds?.id?.[0]), ...input, location };
+    return { id: Number(result.outBinds?.id?.[0]), ...input, assetTag, location };
   } catch (error) {
     await connection.rollback();
     console.info(`[oracle] Asset insert failed: ${error instanceof Error ? error.message : "unknown error"}`);
@@ -261,6 +293,12 @@ export async function updateAsset(input: Partial<AssetInput> & { id: number; act
       }
     }
     if (assetColumns.assignedColumn && input.assignedTo !== undefined) {
+      console.info("[assets] Update assignment context", {
+        assetId: input.id,
+        assignedIdentifierField: assetColumns.assignedColumn,
+        assignedIdentifierValue: input.assignedTo,
+        actorId: input.actorId
+      });
       updates.push(`${assetColumns.assignedColumn} = :assignedTo`);
       binds.assignedTo = input.assignedTo;
     }
@@ -293,13 +331,19 @@ export async function assignAsset(input: { id: number; employeeId: number; actor
   try {
     const assetColumns = await getAssetColumns(connection);
     if (!assetColumns.assignedColumn) return;
+    console.info("[assets] Assignment update", {
+      assetId: input.id,
+      assignedIdentifierField: assetColumns.assignedColumn,
+      assignedIdentifierValue: input.employeeId,
+      actorId: input.actorId
+    });
     await connection.execute(
       `UPDATE assets
        SET ${assetColumns.assignedColumn} = :employeeId, status = 'assigned'${assetColumns.columns.has("LIFECYCLE_STATE") ? ", lifecycle_state = 'Assigned'" : ""}${assetColumns.columns.has("UPDATED_AT") ? ", updated_at = CURRENT_TIMESTAMP" : ""}
        WHERE id = :id`,
       { id: input.id, employeeId: input.employeeId }
     );
-    await createNotification({ userId: input.employeeId, title: "Asset assigned", body: `Asset #${input.id} has been assigned to you.` }, connection);
+    await createNotification({ userId: input.employeeId, title: "Asset assigned", body: `Asset #${input.id} has been assigned to you.`, category: "assetAssignment" }, connection);
     await writeAuditLog({ userId: input.actorId, action: "asset_assigned", details: `Asset #${input.id} assigned to user #${input.employeeId}.` }, connection);
     await connection.commit();
   } catch (error) {
@@ -405,7 +449,7 @@ export async function createAssetRequest(input: { requesterId: number; assetType
         Object.fromEntries(values.map(([, bind, value]) => [bind, value]))
       );
     }
-    await notifyAdmins({ title: "Asset request submitted", body: `A new ${input.assetType || "asset"} request needs review.` }, connection);
+    await notifyAdmins({ title: "Asset request submitted", body: `A new ${input.assetType || "asset"} request needs review.`, category: "assetRequest" }, connection);
     await writeAuditLog({ userId: input.requesterId, action: "asset_request_created", details: `${input.assetType || "Asset"} requested.` }, connection);
     await connection.commit();
   } catch (error) {

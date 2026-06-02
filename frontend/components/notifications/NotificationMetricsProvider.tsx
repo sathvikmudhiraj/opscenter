@@ -30,7 +30,7 @@ export function NotificationMetricsProvider({ children }: { children: React.Reac
 
     const interval = window.setInterval(() => {
       refreshUnreadCount().catch(() => undefined);
-    }, 30000);
+    }, 120000);
 
     const refreshOnFocus = () => {
       if (!document.hidden) refreshUnreadCount().catch(() => undefined);
@@ -74,9 +74,7 @@ export function NotificationMetricsProvider({ children }: { children: React.Reac
         refreshUnreadCount().catch(() => undefined);
       }
     });
-    events.onerror = () => {
-      refreshUnreadCount().catch(() => undefined);
-    };
+    events.onerror = () => undefined;
 
     return () => events.close();
   }, [refreshUnreadCount, tokenVersion]);

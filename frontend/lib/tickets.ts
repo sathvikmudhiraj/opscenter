@@ -15,6 +15,25 @@ function numberValue(value: unknown, fallback = 0) {
   return Number.isFinite(next) ? next : fallback;
 }
 
+function normalizedToken(value: unknown, fallback = "") {
+  return stringValue(value, fallback).trim().toLowerCase().replaceAll(" ", "_").replaceAll("-", "_");
+}
+
+export const openTicketStatuses = new Set<Ticket["status"]>(["open", "assigned", "in_progress", "escalated"]);
+export const closedTicketStatuses = new Set<Ticket["status"]>(["resolved", "closed"]);
+
+export function isOpenTicket(ticket: Pick<Ticket, "status">) {
+  return openTicketStatuses.has(ticket.status);
+}
+
+export function isClosedTicket(ticket: Pick<Ticket, "status">) {
+  return closedTicketStatuses.has(ticket.status);
+}
+
+export function isSlaWarningTicket(ticket: Pick<Ticket, "priority" | "slaRisk" | "status">) {
+  return !isClosedTicket(ticket) && (ticket.priority === "critical" || ticket.slaRisk === "high" || ticket.status === "escalated");
+}
+
 export function normalizeTicket(ticket: ApiTicket | null | undefined): Ticket {
   const source = ticket || {};
   return {
@@ -26,8 +45,8 @@ export function normalizeTicket(ticket: ApiTicket | null | undefined): Ticket {
     block: source.BLOCK || undefined,
     roomNumber: source.ROOM_NUMBER || undefined,
     assetTagManual: source.ASSET_TAG_MANUAL || undefined,
-    status: stringValue(source.STATUS, "open") as Ticket["status"],
-    priority: stringValue(source.PRIORITY, "low") as Ticket["priority"],
+    status: normalizedToken(source.STATUS, "open") as Ticket["status"],
+    priority: normalizedToken(source.PRIORITY, "low") as Ticket["priority"],
     requesterName: stringValue(source.REQUESTER_NAME, "Unknown user"),
     requesterUserId: source.REQUESTER_USER_ID ? numberValue(source.REQUESTER_USER_ID) : undefined,
     requesterId: source.REQUESTER_ID || undefined,

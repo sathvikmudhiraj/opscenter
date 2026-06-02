@@ -4,6 +4,7 @@ import { getConnection } from "../config/database";
 import { HttpError } from "../utils/httpError";
 import { writeAuditLog } from "./audit.service";
 import { createNotification, notifyAdmins } from "./notification.service";
+import { getSystemSettings, validatePasswordPolicy } from "./settings.service";
 
 type ResetStatus = "PENDING" | "APPROVED" | "REJECTED" | "COMPLETED";
 
@@ -19,8 +20,28 @@ async function getUserColumns(connection: any) {
   };
 }
 
-export function generateTemporaryPassword() {
-  return `Ops-${randomBytes(9).toString("base64url")}1!`;
+export async function generateTemporaryPassword() {
+  const { security } = await getSystemSettings();
+  const minimumLength = Math.max(8, security.minimumPasswordLength);
+  const required = [
+    security.requireUppercase ? "A" : "",
+    security.requireLowercase ? "a" : "",
+    security.requireNumbers ? "1" : "",
+    security.requireSpecialCharacters ? "!" : ""
+  ].join("");
+
+  for (let index = 0; index < 10; index += 1) {
+    const randomPart = randomBytes(18).toString("base64url");
+    const candidate = `Ops-${required}-${randomPart}`.slice(0, Math.max(minimumLength, required.length + 8));
+    try {
+      await validatePasswordPolicy(candidate);
+      return candidate;
+    } catch {
+      // Try again with fresh entropy.
+    }
+  }
+
+  return `Ops-${required}-Reset${Date.now()}!`.slice(0, Math.max(minimumLength, required.length + 12));
 }
 
 export async function requestPasswordReset(input: { username: string }) {
@@ -121,6 +142,7 @@ export async function completePasswordReset(input: { id: number; actorId: number
     const request = await getRequestForUpdate(connection, input.id);
     if (request.STATUS === "REJECTED") throw new HttpError(400, "Request was rejected");
 
+    await validatePasswordPolicy(input.temporaryPassword);
     const userColumns = await getUserColumns(connection);
     const passwordHash = await bcrypt.hash(input.temporaryPassword, 12);
     const updates = ["password_hash = :passwordHash"];
@@ -160,6 +182,7 @@ export async function changeOwnPassword(input: { userId: number; currentPassword
     const valid = await bcrypt.compare(input.currentPassword, String(user.PASSWORD_HASH || "")).catch(() => false);
     if (!valid) throw new HttpError(401, "Current password is incorrect");
 
+    await validatePasswordPolicy(input.newPassword);
     const passwordHash = await bcrypt.hash(input.newPassword, 12);
     const updates = ["password_hash = :passwordHash"];
     if (userColumns.hasPasswordMustChange) updates.push("password_must_change = 0");

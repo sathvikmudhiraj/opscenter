@@ -36,6 +36,25 @@ const emptyForm = {
   status: "active" as ManagedUser["status"]
 };
 
+let usersRequest: Promise<ManagedUser[]> | null = null;
+let cachedUsers: ManagedUser[] | null = null;
+let cachedUsersAt = 0;
+
+async function fetchManagedUsers(force = false) {
+  if (!force && cachedUsers && Date.now() - cachedUsersAt < 5000) return cachedUsers;
+  if (!force && usersRequest) return usersRequest;
+  usersRequest = api.get<{ data?: ManagedUser[] }>("/users")
+    .then(({ data }) => {
+      cachedUsers = Array.isArray(data.data) ? data.data : [];
+      cachedUsersAt = Date.now();
+      return cachedUsers;
+    })
+    .finally(() => {
+      usersRequest = null;
+    });
+  return usersRequest;
+}
+
 export function UserRoleManager() {
   const [users, setUsers] = useState<ManagedUser[]>([]);
   const [savingId, setSavingId] = useState<number | null>(null);
@@ -47,11 +66,10 @@ export function UserRoleManager() {
   const [form, setForm] = useState(emptyForm);
   const [filters, setFilters] = useState({ search: "", role: "all", department: "all", status: "all" });
 
-  async function loadUsers() {
+  async function loadUsers(force = false) {
     setLoading(true);
     try {
-      const { data } = await api.get<{ data?: ManagedUser[] }>("/users");
-      setUsers(Array.isArray(data.data) ? data.data : []);
+      setUsers(await fetchManagedUsers(force));
       setError("");
     } catch (requestError) {
       setUsers([]);
@@ -117,7 +135,7 @@ export function UserRoleManager() {
         setMessage(`${form.username} created.`);
       }
       setModalOpen(false);
-      await loadUsers();
+      await loadUsers(true);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Could not save user.");
     } finally {
@@ -130,7 +148,7 @@ export function UserRoleManager() {
     setMessage("");
     try {
       await api.patch(`/users/${user.id}/role`, { role });
-      await loadUsers();
+      await loadUsers(true);
       setMessage(`${user.loginId} now routes to /${role}/dashboard`);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Could not update role.");
@@ -145,7 +163,7 @@ export function UserRoleManager() {
     try {
       const status = user.status === "active" ? "inactive" : "active";
       await api.patch(`/users/${user.id}/status`, { status });
-      await loadUsers();
+      await loadUsers(true);
       setMessage(`${user.loginId} is now ${status}`);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Could not update user status.");
@@ -174,7 +192,7 @@ export function UserRoleManager() {
     setMessage("");
     try {
       await api.delete(`/users/${user.id}`);
-      await loadUsers();
+      await loadUsers(true);
       setMessage(`${user.loginId} deleted.`);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Could not delete user.");

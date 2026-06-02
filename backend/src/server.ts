@@ -4,8 +4,8 @@ import { env } from "./config/env";
 
 async function bootstrap() {
   const app = createApp();
-  const server = app.listen(env.port, () => {
-    console.log(`OpsCenter API listening on http://localhost:${env.port}`);
+  const server = app.listen(env.port, env.host, () => {
+    console.log(`OpsCenter API listening on http://${env.host}:${env.port}`);
   });
 
   process.on("SIGINT", async () => {

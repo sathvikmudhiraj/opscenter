@@ -1,8 +1,8 @@
 import { lookup } from "dns/promises";
-import { env } from "../config/env";
 import { getConnection } from "../config/database";
 import { writeAuditLog } from "./audit.service";
 import { notifyAdmins } from "./notification.service";
+import { getSystemSettings, type SystemSettings } from "./settings.service";
 
 type ServiceKey = "hpep-intranet" | "bhel-webmail" | "network-health";
 type ServiceStatus = "healthy" | "online" | "slow" | "offline" | "unknown";
@@ -50,25 +50,27 @@ export type ServiceHealthHistoryPoint = {
   errorMessage: string | null;
 };
 
-const services: ServiceDefinition[] = [
-  {
-    key: "hpep-intranet",
-    name: "HPEP Intranet",
-    url: env.serviceHealth.hpepIntranetUrl,
-    onlineLabel: "Healthy"
-  },
-  {
-    key: "bhel-webmail",
-    name: "BHEL Webmail",
-    url: env.serviceHealth.bhelWebmailUrl,
-    onlineLabel: "Online"
-  }
-];
-
 const previousStatus = new Map<ServiceKey, ServiceStatus>();
 const lastSuccessfulChecks = new Map<ServiceKey, string>();
 const networkProbeUrl = "https://www.google.com/generate_204";
 const dnsProbeHost = "google.com";
+
+function servicesFromSettings(settings: SystemSettings): ServiceDefinition[] {
+  return [
+    {
+      key: "hpep-intranet",
+      name: "HPEP Intranet",
+      url: settings.infrastructure.hpepIntranetUrl,
+      onlineLabel: "Healthy"
+    },
+    {
+      key: "bhel-webmail",
+      name: "BHEL Webmail",
+      url: settings.infrastructure.bhelWebmailUrl,
+      onlineLabel: "Online"
+    }
+  ];
+}
 
 function normalizeRange(range: unknown): RangeKey {
   return range === "7d" || range === "30d" ? range : "24h";
@@ -149,7 +151,8 @@ async function recordOfflineTransition(connection: any, snapshot: ServiceHealthS
   if (snapshot.status === "offline") {
     await notifyAdmins({
       title: `${snapshot.serviceName} Offline`,
-      body: `${snapshot.serviceName} is unreachable. ${snapshot.message}`
+      body: `${snapshot.serviceName} is unreachable. ${snapshot.message}`,
+      category: "serviceOutage"
     }, connection);
   }
 }
@@ -202,7 +205,7 @@ async function getHistoryStats(connection: any, serviceKey: ServiceKey, range: R
   };
 }
 
-async function checkNetworkHealth(): Promise<ServiceHealthSnapshot> {
+async function checkNetworkHealth(settings: SystemSettings): Promise<ServiceHealthSnapshot> {
   const checkedAt = new Date().toISOString();
   let dnsStatus = "Failed";
   let dnsResponseTimeMs: number | null = null;
@@ -223,7 +226,7 @@ async function checkNetworkHealth(): Promise<ServiceHealthSnapshot> {
   const probes = await Promise.all(Array.from({ length: 4 }).map(async () => {
     const started = Date.now();
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2500);
+    const timeout = setTimeout(() => controller.abort(), settings.infrastructure.timeoutThresholdMs);
     try {
       const response = await fetch(networkProbeUrl, { method: "GET", signal: controller.signal });
       return response.ok ? Date.now() - started : null;
@@ -240,11 +243,11 @@ async function checkNetworkHealth(): Promise<ServiceHealthSnapshot> {
   if (successfulProbes.length) {
     latencyMs = Math.round(successfulProbes.reduce((sum, probe) => sum + probe, 0) / successfulProbes.length);
     internetStatus = "Online";
-    if (packetLossPercent === 0 && dnsStatus === "Resolved" && latencyMs < 250) {
+    if (packetLossPercent === 0 && dnsStatus === "Resolved" && latencyMs < settings.infrastructure.slowResponseThresholdMs) {
       status = "healthy";
       message = "Network operating normally";
       lastSuccessfulChecks.set("network-health", checkedAt);
-    } else if (packetLossPercent < 50 && dnsStatus === "Resolved") {
+    } else if (packetLossPercent < settings.infrastructure.packetLossThresholdPercent && dnsStatus === "Resolved") {
       status = "slow";
       message = "Network degradation detected";
     } else {
@@ -274,7 +277,7 @@ async function checkNetworkHealth(): Promise<ServiceHealthSnapshot> {
   };
 }
 
-async function checkService(service: ServiceDefinition, network: ServiceHealthSnapshot): Promise<ServiceHealthSnapshot> {
+async function checkService(service: ServiceDefinition, network: ServiceHealthSnapshot, settings: SystemSettings): Promise<ServiceHealthSnapshot> {
   const checkedAt = new Date().toISOString();
   let responseTimeMs: number | null = null;
   let status: ServiceStatus = "offline";
@@ -288,7 +291,7 @@ async function checkService(service: ServiceDefinition, network: ServiceHealthSn
   } else {
     const started = Date.now();
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2500);
+    const timeout = setTimeout(() => controller.abort(), settings.infrastructure.timeoutThresholdMs);
     try {
       let response = await fetch(service.url, { method: "HEAD", signal: controller.signal });
       if (response.status === 405) {
@@ -296,7 +299,7 @@ async function checkService(service: ServiceDefinition, network: ServiceHealthSn
       }
       responseTimeMs = Date.now() - started;
       if (response.ok) {
-        status = responseTimeMs < 500 ? (service.onlineLabel === "Healthy" ? "healthy" : "online") : "slow";
+        status = responseTimeMs < settings.infrastructure.slowResponseThresholdMs ? (service.onlineLabel === "Healthy" ? "healthy" : "online") : "slow";
         message = status === "slow" ? "Slow response detected" : "Service reachable";
         lastSuccessfulChecks.set(service.key, checkedAt);
       } else {
@@ -351,9 +354,10 @@ function mapHistoryRow(row: Record<string, any>): ServiceHealthHistoryPoint {
 export async function getCurrentServiceHealth() {
   const connection = await getConnection();
   try {
+    const settings = await getSystemSettings();
     await ensureServiceHealthHistoryTable(connection);
-    const network = await checkNetworkHealth();
-    const serviceSnapshots = await Promise.all(services.map((service) => checkService(service, network)));
+    const network = await checkNetworkHealth(settings);
+    const serviceSnapshots = await Promise.all(servicesFromSettings(settings).map((service) => checkService(service, network, settings)));
     const snapshots = [...serviceSnapshots, network];
 
     for (const snapshot of snapshots) {

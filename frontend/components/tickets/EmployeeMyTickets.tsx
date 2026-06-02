@@ -5,7 +5,7 @@ import Link from "next/link";
 import { Search } from "lucide-react";
 import { api } from "@/lib/api";
 import { getSessionUser } from "@/lib/auth";
-import { normalizeTicket } from "@/lib/tickets";
+import { isClosedTicket, isOpenTicket, isSlaWarningTicket, normalizeTicket } from "@/lib/tickets";
 import type { Ticket } from "@/types/ticket";
 import { StatusBadge } from "./StatusBadge";
 
@@ -26,10 +26,9 @@ export function EmployeeMyTickets({ tickets: providedTickets, filter = "all", lo
       const belongsToUser = user?.id ? ticket.requesterUserId === user.id : true;
       const matchesFilter =
         filter === "all" ||
-        (filter === "open" && ticket.status === "open") ||
-        (filter === "active" && !["resolved", "closed"].includes(ticket.status)) ||
-        (filter === "sla" && (ticket.priority === "critical" || ticket.slaRisk === "high" || ticket.status === "escalated")) ||
-        (filter === "closed" && ["resolved", "closed"].includes(ticket.status));
+        ((filter === "open" || filter === "active") && isOpenTicket(ticket)) ||
+        (filter === "sla" && isSlaWarningTicket(ticket)) ||
+        (filter === "closed" && isClosedTicket(ticket));
       const haystack = `${ticket.id} ${ticket.title} ${ticket.priority} ${ticket.status} ${ticket.assignedToName || ""}`.toLowerCase();
       return belongsToUser && matchesFilter && haystack.includes(search.toLowerCase());
     });

@@ -35,29 +35,12 @@ api.interceptors.response.use(
       }
     }
 
-    // Handle 429 Too Many Requests with retry and exponential backoff
     if (error.response && error.response.status === 429) {
-      const config = error.config;
-      // Initialize retry count if not present
-      if (!config.__retryCount) {
-        config.__retryCount = 0;
-      }
-      // If we've retried 3 times, don't retry again (so total 4 attempts)
-      if (config.__retryCount >= 3) {
-        console.error("[API Error] Max retries exceeded for 429 error");
-        const message = error.response?.data?.message || error.message || "OpsCenter API request failed";
-        console.error("[API Error]", message);
-        return Promise.reject(new Error(message));
-      }
-      // Increment retry count
-      config.__retryCount += 1;
-      // Exponential backoff: 1000ms, 2000ms, 4000ms
-      const delay = Math.pow(2, config.__retryCount) * 1000;
-      console.log(`[API Response] 429 Too Many Requests, retrying in ${delay}ms (attempt ${config.__retryCount})`);
-      // Wait for the delay
-      await new Promise(resolve => setTimeout(resolve, delay));
-      // Retry the request using the same api instance
-      return api(config);
+      const method = String(error.config?.method || "GET").toUpperCase();
+      const url = String(error.config?.url || "unknown URL");
+      const message = `Rate limit exceeded for ${method} ${url}`;
+      console.error("[API Error]", message);
+      return Promise.reject(new Error(message));
     }
 
     const message = error?.response?.data?.message || error?.message || "OpsCenter API request failed";

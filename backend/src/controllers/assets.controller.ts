@@ -28,8 +28,18 @@ const assetUpdateSchema = assetSchema.partial();
 const assetAssignSchema = z.object({ employeeId: z.coerce.number().int().positive() });
 const requestDecisionSchema = z.object({ status: z.enum(["approved", "rejected"]) });
 
-export const getAssets = asyncHandler(async (_req, res) => {
-  res.json({ data: await listAssets() });
+export const getAssets = asyncHandler(async (req, res) => {
+  const mine = req.query.mine === "true" || req.query.mine === "1";
+  res.json({
+    data: await listAssets({
+      assignedToUserId: mine ? req.user!.sub : undefined,
+      requester: {
+        id: req.user!.sub,
+        username: req.user!.username,
+        email: req.user!.email
+      }
+    })
+  });
 });
 
 export const requestAsset = asyncHandler(async (req, res) => {

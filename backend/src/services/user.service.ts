@@ -6,6 +6,7 @@ import type { UserRole } from "../types/auth";
 import { HttpError } from "../utils/httpError";
 import { writeAuditLog } from "./audit.service";
 import { createNotification } from "./notification.service";
+import { validatePasswordPolicy } from "./settings.service";
 
 export type UserStatus = "active" | "inactive" | "disabled";
 
@@ -135,6 +136,7 @@ export async function getUserProfile(id: number) {
 export async function createUser(input: CreateUserInput) {
   const connection = await getConnection();
   try {
+    await validatePasswordPolicy(input.password);
     const meta = await getUserColumns(connection);
     const passwordHash = await bcrypt.hash(input.password, 12);
     const values: Array<[string, string, unknown]> = [
@@ -228,7 +230,8 @@ export async function resetPassword(input: { id: number; actorId: number; passwo
     const user = (userResult.rows || [])[0] as { USERNAME: string } | undefined;
     if (!user) throw new HttpError(404, "User not found");
 
-    const temporaryPassword = input.password || `Ops-${randomBytes(6).toString("base64url")}`;
+    const temporaryPassword = input.password || `Ops-${randomBytes(8).toString("base64url")}1`;
+    await validatePasswordPolicy(temporaryPassword);
     const passwordHash = await bcrypt.hash(temporaryPassword, 12);
     await connection.execute(
       `UPDATE users

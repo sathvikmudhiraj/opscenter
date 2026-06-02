@@ -10,12 +10,28 @@ type Notification = { id: number; title: string; body: string; readAt: string | 
 export function NotificationBell() {
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<Notification[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const { unreadCount } = useNotificationMetrics();
 
   useEffect(() => {
-    api.get<{ data: Notification[] }>("/notifications").then(({ data }) => setItems(data.data)).catch(() => setItems([]));
-  }, []);
+    if (!open || loaded) return;
+    let active = true;
+    api.get<{ data: Notification[] }>("/notifications")
+      .then(({ data }) => {
+        if (!active) return;
+        setItems(data.data);
+        setLoaded(true);
+      })
+      .catch(() => {
+        if (!active) return;
+        setItems([]);
+        setLoaded(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [loaded, open]);
 
   useEffect(() => {
     function closeOnOutsideClick(event: MouseEvent) {

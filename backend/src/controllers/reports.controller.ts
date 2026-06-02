@@ -1,8 +1,8 @@
 import { getAdminReports, getSlaReports, getTicketCategories, getSlaDistribution, getAssetStatus, getDepartmentDistribution, getEngineerPerformance } from "../services/reports.service";
 import { asyncHandler } from "../utils/asyncHandler";
 
-export const getReports = asyncHandler(async (_req, res) => {
-  res.json({ data: await getAdminReports() });
+export const getReports = asyncHandler(async (req, res) => {
+  res.json({ data: await getAdminReports(req.query.ticketTrendRange) });
 });
 
 export const getSlaReport = asyncHandler(async (_req, res) => {

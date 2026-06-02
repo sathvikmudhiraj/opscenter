@@ -69,9 +69,20 @@ export function AssetInventory({ mode }: { mode: "employee" | "admin" }) {
 
   async function load() {
     const [{ data: assetData }, userResponse] = await Promise.all([
-      api.get<{ data: Asset[] }>("/assets"),
+      api.get<{ data: Asset[] }>(mode === "employee" ? "/assets?mine=true" : "/assets"),
       mode === "admin" ? api.get<{ data: User[] }>("/users") : Promise.resolve({ data: { data: [] as User[] } })
     ]);
+    if (mode === "employee") {
+      console.info("[assets] Employee asset lookup", {
+        loggedInEmployeeIdentifier: { id: user?.id, username: user?.username, email: user?.email },
+        query: "/assets?mine=true",
+        returnedAssignedIdentifiers: assetData.data.map((asset) => ({
+          assetTag: asset.assetTag,
+          assignedTo: asset.assignedTo,
+          assignedToLogin: asset.assignedToLogin
+        }))
+      });
+    }
     setAssets(assetData.data);
     setUsers(userResponse.data.data);
   }
@@ -82,7 +93,7 @@ export function AssetInventory({ mode }: { mode: "employee" | "admin" }) {
 
   const departments = useMemo(() => ["all", ...Array.from(new Set(assets.map((asset) => asset.department).filter(Boolean)))], [assets]);
   const visible = useMemo(() => {
-    const scoped = mode === "employee" ? assets.filter((asset) => asset.assignedToLogin === user?.email) : assets;
+    const scoped = assets;
     return scoped.filter((asset) => {
       const haystack = `${asset.assetTag} ${asset.assetName} ${asset.brand} ${asset.model} ${asset.serialNumber} ${asset.department} ${asset.assignedToName} ${asset.processor} ${asset.ram} ${asset.storage} ${asset.operatingSystem}`.toLowerCase();
       return (
@@ -92,7 +103,7 @@ export function AssetInventory({ mode }: { mode: "employee" | "admin" }) {
         (filters.warranty === "all" || warrantyState(asset.warrantyExpiry) === filters.warranty)
       );
     });
-  }, [assets, filters, mode, user?.email]);
+  }, [assets, filters]);
 
   function openCreate() {
     setEditing(null);

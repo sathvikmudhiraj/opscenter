@@ -1,5 +1,6 @@
 import { getConnection } from "../config/database";
 import { getUnreadNotificationCount } from "./notification.service";
+import { getSystemSettings, type SystemSettings } from "./settings.service";
 
 async function tableExists(connection: any, tableName: string) {
   const result = await connection.execute(
@@ -33,7 +34,13 @@ function addHours(date: Date, hours: number) {
   return new Date(date.getTime() + hours * 60 * 60 * 1000);
 }
 
-function priorityHours(priority: string) {
+function priorityHours(priority: string, settings?: SystemSettings["sla"]) {
+  if (settings) {
+    if (priority === "critical") return settings.criticalHours;
+    if (priority === "high") return settings.highHours;
+    if (priority === "medium") return settings.mediumHours;
+    return settings.lowHours;
+  }
   if (priority === "critical") return 1;
   if (priority === "high") return 4;
   if (priority === "medium") return 8;
@@ -54,6 +61,44 @@ function dayKey(date: Date) {
 }
 
 const resolvedStatuses = new Set(["resolved", "closed"]);
+type TicketTrendRange = "24h" | "7d" | "30d";
+
+function normalizeTicketTrendRange(range: unknown): TicketTrendRange {
+  return range === "7d" || range === "30d" ? range : "24h";
+}
+
+function addDays(date: Date, days: number) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function addBucket(date: Date, range: TicketTrendRange) {
+  const next = new Date(date);
+  if (range === "24h") next.setHours(next.getHours() + 1);
+  else next.setDate(next.getDate() + 1);
+  return next;
+}
+
+function startOfBucket(date: Date, range: TicketTrendRange) {
+  const next = new Date(date);
+  next.setMinutes(0, 0, 0);
+  if (range !== "24h") next.setHours(0, 0, 0, 0);
+  return next;
+}
+
+function trendLabel(date: Date, range: TicketTrendRange) {
+  if (range === "24h") {
+    return new Intl.DateTimeFormat("en", { hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
+  }
+  return `${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function sameBucket(left: Date | null, right: Date, range: TicketTrendRange) {
+  if (!left) return false;
+  const leftBucket = startOfBucket(left, range);
+  return leftBucket.getTime() === right.getTime();
+}
 
 type SlaTicket = {
   id: number;
@@ -85,10 +130,10 @@ function isResolvedStatus(status: string) {
   return resolvedStatuses.has(status);
 }
 
-function evaluateSla(row: Record<string, any>, now: Date): SlaTicket | null {
+function evaluateSla(row: Record<string, any>, now: Date, settings?: SystemSettings["sla"]): SlaTicket | null {
   const createdAt = asDate(row.CREATED_AT);
   const priority = String(row.PRIORITY || "low").toLowerCase();
-  const dueAt = asDate(row.SLA_DUE_AT) || asDate(row.SLA_DEADLINE) || (createdAt ? addHours(createdAt, priorityHours(priority)) : null);
+  const dueAt = asDate(row.SLA_DUE_AT) || asDate(row.SLA_DEADLINE) || (createdAt ? addHours(createdAt, priorityHours(priority, settings)) : null);
   if (!createdAt || !dueAt) return null;
 
   const status = String(row.STATUS || "open").toLowerCase();
@@ -103,7 +148,8 @@ function evaluateSla(row: Record<string, any>, now: Date): SlaTicket | null {
     : now.getTime() > dueAt.getTime();
   const totalWindow = dueAt.getTime() - createdAt.getTime();
   const remainingMs = dueAt.getTime() - now.getTime();
-  const atRisk = active && !breached && totalWindow > 0 && remainingMs <= totalWindow * 0.25;
+  const threshold = (settings?.warningThresholdPercent ?? 25) / 100;
+  const atRisk = active && !breached && totalWindow > 0 && remainingMs <= totalWindow * threshold;
   const resolutionMinutes = resolvedAt
     ? Math.max(0, Math.round((resolvedAt.getTime() - createdAt.getTime()) / 60000))
     : null;
@@ -144,6 +190,7 @@ function summarizeSla(rows: SlaTicket[]): SlaSummary {
 }
 
 async function getSlaRows(connection: any, includeAssignee = false) {
+  const settings = await getSystemSettings();
   const ticketColumns = await tableColumns(connection, "TICKETS");
   const userColumns = await tableColumns(connection, "USERS");
   const hasAssignedTo = includeAssignee && ticketColumns.has("ASSIGNED_TO") && userColumns.size > 0;
@@ -165,13 +212,56 @@ async function getSlaRows(connection: any, includeAssignee = false) {
   const now = new Date();
   const rawRows = (result.rows || []) as Array<Record<string, any>>;
   const slaRows = rawRows
-    .map((row) => evaluateSla(row, now))
+    .map((row) => evaluateSla(row, now, settings.sla))
     .filter((ticket): ticket is SlaTicket => ticket !== null);
   console.info(`SLA Engine processed ${slaRows.length} tickets. Raw tickets: ${rawRows.length}.`);
   return slaRows;
 }
 
-export async function getAdminReports() {
+async function getTicketTrend(connection: any, rangeInput: unknown) {
+  const range = normalizeTicketTrendRange(rangeInput);
+  const ticketColumns = await tableColumns(connection, "TICKETS");
+  if (!ticketColumns.has("CREATED_AT")) return [];
+
+  const resolvedAtSelect = ticketColumns.has("RESOLVED_AT") ? "resolved_at" : ticketColumns.has("UPDATED_AT") ? "updated_at" : "NULL";
+  const result = await connection.execute(
+    `SELECT id, status, created_at, ${resolvedAtSelect} AS resolved_at
+     FROM tickets`
+  );
+  const rows = ((result.rows || []) as Array<Record<string, any>>).map((row) => {
+    const status = String(row.STATUS || "").toLowerCase();
+    return {
+      createdAt: asDate(row.CREATED_AT),
+      resolvedAt: isResolvedStatus(status) ? asDate(row.RESOLVED_AT) : null,
+      resolved: isResolvedStatus(status)
+    };
+  });
+
+  const now = new Date();
+  const bucketCount = range === "24h" ? 24 : range === "7d" ? 7 : 30;
+  const start = range === "24h" ? new Date(now.getTime() - 23 * 60 * 60 * 1000) : addDays(now, -(bucketCount - 1));
+  let cursor = startOfBucket(start, range);
+  const buckets: Date[] = [];
+  for (let index = 0; index < bucketCount; index += 1) {
+    buckets.push(cursor);
+    cursor = addBucket(cursor, range);
+  }
+
+  return buckets.map((bucketStart) => {
+    const bucketEnd = addBucket(bucketStart, range);
+    return {
+      label: trendLabel(bucketStart, range),
+      createdTickets: rows.filter((ticket) => sameBucket(ticket.createdAt, bucketStart, range)).length,
+      resolvedTickets: rows.filter((ticket) => sameBucket(ticket.resolvedAt, bucketStart, range)).length,
+      openBacklog: rows.filter((ticket) => {
+        if (!ticket.createdAt || ticket.createdAt.getTime() >= bucketEnd.getTime()) return false;
+        return !ticket.resolvedAt || ticket.resolvedAt.getTime() >= bucketEnd.getTime();
+      }).length
+    };
+  });
+}
+
+export async function getAdminReports(ticketTrendRange: unknown = "24h") {
   const connection = await getConnection();
   try {
     const hasTickets = await tableExists(connection, "TICKETS");
@@ -210,12 +300,7 @@ export async function getAdminReports() {
        ORDER BY value DESC`
     )).rows || [] : [];
 
-    const ticketTrend = hasTickets ? (await connection.execute(
-      `SELECT TO_CHAR(created_at, 'YYYY-MM-DD') AS label, COUNT(*) AS value
-       FROM tickets
-       GROUP BY TO_CHAR(created_at, 'YYYY-MM-DD')
-       ORDER BY label`
-    )).rows || [] : [];
+    const ticketTrend = hasTickets ? await getTicketTrend(connection, ticketTrendRange) : [];
 
     const engineerPerformance = hasTickets && hasUsers ? (await connection.execute(
       `SELECT u.username AS label, COUNT(t.id) AS value

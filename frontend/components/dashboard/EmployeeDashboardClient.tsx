@@ -6,7 +6,7 @@ import { AlertTriangle, Bell, ClipboardList, Monitor, Timer, Wrench } from "luci
 import { Bar, BarChart, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api } from "@/lib/api";
 import { getSessionUser } from "@/lib/auth";
-import { normalizeTicket } from "@/lib/tickets";
+import { isClosedTicket, isOpenTicket, isSlaWarningTicket, normalizeTicket } from "@/lib/tickets";
 import type { Ticket } from "@/types/ticket";
 import { KpiCard } from "./KpiCard";
 import { EmployeeMyTickets } from "@/components/tickets/EmployeeMyTickets";
@@ -34,9 +34,17 @@ export function EmployeeDashboardClient() {
     try {
       const [{ data: ticketData }, { data: assetData }, { data: notificationData }] = await Promise.all([
         api.get<{ data: any[] }>(`/tickets?requesterId=${user?.id ?? ""}`),
-        api.get<{ data: Asset[] }>("/assets"),
+        api.get<{ data: Asset[] }>("/assets?mine=true"),
         api.get<{ data: Notification[] }>("/notifications")
       ]);
+      console.info("[assets] Employee dashboard asset lookup", {
+        loggedInEmployeeIdentifier: { id: user?.id, username: user?.username, email: user?.email },
+        query: "/assets?mine=true",
+        returnedAssignedIdentifiers: assetData.data.map((asset) => ({
+          assetTag: asset.assetTag,
+          assignedToLogin: asset.assignedToLogin
+        }))
+      });
       setTickets(ticketData.data.map(normalizeTicket));
       setAssets(assetData.data);
       setNotifications(notificationData.data);
@@ -55,20 +63,17 @@ export function EmployeeDashboardClient() {
     return tickets.filter((ticket) => !user?.id || ticket.requesterUserId === user.id);
   }, [tickets, user?.id]);
 
-  const assignedAssets = useMemo(() => {
-    const loginId = user?.email?.toLowerCase();
-    return assets.filter((asset) => !loginId || asset.assignedToLogin === loginId);
-  }, [assets, user?.email]);
+  const assignedAssets = assets;
 
-  const openTickets = mine.filter((ticket) => ticket.status === "open");
-  const activeTickets = mine.filter((ticket) => !["resolved", "closed"].includes(ticket.status));
-  const slaRisk = mine.filter((ticket) => ticket.priority === "critical" || ticket.slaRisk === "high" || ticket.status === "escalated");
-  const closedTickets = mine.filter((ticket) => ["resolved", "closed"].includes(ticket.status));
-  const avgResponse = activeTickets.length ? `${Math.max(15, activeTickets.length * 12)}m` : "0m";
+  const openTickets = mine.filter(isOpenTicket);
+  const slaRisk = mine.filter(isSlaWarningTicket);
+  const resolvedTickets = mine.filter(isClosedTicket);
+  const avgResponse = openTickets.length ? `${Math.max(15, openTickets.length * 12)}m` : "0m";
   const statusChartData = [
     { name: "Open", value: mine.filter((ticket) => ticket.status === "open").length },
     { name: "Assigned", value: mine.filter((ticket) => ticket.status === "assigned").length },
     { name: "In Progress", value: mine.filter((ticket) => ticket.status === "in_progress").length },
+    { name: "Escalated", value: mine.filter((ticket) => ticket.status === "escalated").length },
     { name: "Resolved", value: mine.filter((ticket) => ticket.status === "resolved").length },
     { name: "Closed", value: mine.filter((ticket) => ticket.status === "closed").length }
   ];
@@ -101,7 +106,7 @@ export function EmployeeDashboardClient() {
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <button type="button" onClick={() => setFilter("open")} className="text-left">
-          <KpiCard label="Open tickets" value={loading ? "..." : String(openTickets.length)} detail={`${activeTickets.length} active support items`} icon={ClipboardList} />
+          <KpiCard label="Open tickets" value={loading ? "..." : String(openTickets.length)} detail={`${openTickets.length} active support items`} icon={ClipboardList} />
         </button>
         <button type="button" onClick={() => setFilter("all")} className="text-left">
           <KpiCard label="Assigned assets" value={loading ? "..." : String(assignedAssets.length)} detail={assignedAssets.slice(0, 3).map((asset) => asset.category || asset.type).join(", ") || "No assets assigned"} icon={Monitor} tone="cyan" />
@@ -110,7 +115,7 @@ export function EmployeeDashboardClient() {
           <KpiCard label="SLA warnings" value={loading ? "..." : String(slaRisk.length)} detail={slaRisk.length ? "Review critical or escalated tickets" : "Within current SLA window"} icon={Timer} tone={slaRisk.length ? "amber" : "green"} />
         </button>
         <button type="button" onClick={() => setFilter("closed")} className="text-left">
-          <KpiCard label="Resolved tickets" value={loading ? "..." : String(closedTickets.length)} detail={`Avg response ${avgResponse}`} icon={Wrench} tone="green" />
+          <KpiCard label="Resolved tickets" value={loading ? "..." : String(resolvedTickets.length)} detail={`Avg response ${avgResponse}`} icon={Wrench} tone="green" />
         </button>
       </div>
 

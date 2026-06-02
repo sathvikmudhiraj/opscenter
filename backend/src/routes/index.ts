@@ -6,6 +6,7 @@ import { notificationsRouter } from "./notifications.routes";
 import { passwordResetRouter } from "./passwordReset.routes";
 import { reportsRouter } from "./reports.routes";
 import { serviceHealthRouter } from "./serviceHealth.routes";
+import { settingsRouter } from "./settings.routes";
 import { ticketsRouter } from "./tickets.routes";
 import { usersRouter } from "./users.routes";
 
@@ -21,3 +22,4 @@ apiRouter.use("/notifications", notificationsRouter);
 apiRouter.use("/password-resets", passwordResetRouter);
 apiRouter.use("/reports", reportsRouter);
 apiRouter.use("/service-health", serviceHealthRouter);
+apiRouter.use("/settings", settingsRouter);

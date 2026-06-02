@@ -6,6 +6,13 @@ import { DonutChart } from "@/components/dashboard/DonutChart";
 import { api } from "@/lib/api";
 
 type ChartRow = { LABEL?: string; VALUE?: number; label?: string; value?: number };
+type TicketTrendRange = "24h" | "7d" | "30d";
+type TicketTrendRow = {
+  label: string;
+  createdTickets: number;
+  resolvedTickets: number;
+  openBacklog: number;
+};
 type ReportsResponse = {
   stats?: {
     totalTickets?: number;
@@ -24,7 +31,7 @@ type ReportsResponse = {
   charts?: {
     byStatus?: ChartRow[];
     byPriority?: ChartRow[];
-    ticketTrend?: ChartRow[];
+    ticketTrend?: TicketTrendRow[];
     engineerPerformance?: ChartRow[];
   };
 };
@@ -42,6 +49,7 @@ function normalizeRows(rows?: ChartRow[]) {
 
 export function AdminReportsClient() {
   const [data, setData] = useState<ReportsResponse>({});
+  const [ticketTrendRange, setTicketTrendRange] = useState<TicketTrendRange>("24h");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [ticketCategories, setTicketCategories] = useState<Array<{ label: string; value: number }>>([]);
@@ -53,25 +61,34 @@ export function AdminReportsClient() {
 
   useEffect(() => {
     let active = true;
-    const fetchData = async () => {
+    const fetchReports = async () => {
       try {
-        // Fetch the existing reports data
-        const reportsResp = await api.get<{ data?: ReportsResponse }>("/reports");
+        const reportsResp = await api.get<{ data?: ReportsResponse }>(`/reports?ticketTrendRange=${ticketTrendRange}`);
         if (!active) return;
         setData(reportsResp.data.data || {});
         setError("");
+      } catch (requestError) {
+        if (!active) return;
+        setError(requestError instanceof Error ? requestError.message : "Reports could not be loaded.");
+      } finally {
+        if (active) setLoading(false);
+      }
+    };
 
-        // Delay function to prevent 429 errors
-        const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+    fetchReports();
+    return () => {
+      active = false;
+    };
+  }, [ticketTrendRange]);
 
-        // Fetch the new report data for donut charts sequentially with delay
-        // Ticket Categories
+  useEffect(() => {
+    let active = true;
+    const fetchAuxiliaryReports = async () => {
+      try {
         const ticketCategoriesResp = await api.get("/reports/ticket-categories");
         if (!active) return;
         setTicketCategories(normalizeRows(ticketCategoriesResp.data.data || []));
-        await delay(800);
 
-        // SLA Distribution
         const slaDistributionResp = await api.get<SlaDistributionResponse>("/reports/sla-distribution");
         if (!active) return;
         if (slaDistributionResp.data?.data) {
@@ -79,21 +96,15 @@ export function AdminReportsClient() {
         } else {
           setSlaDistribution([]);
         }
-        await delay(800);
 
-        // Asset Status
         const assetStatusResp = await api.get("/reports/asset-status");
         if (!active) return;
         setAssetStatus(normalizeRows(assetStatusResp.data.data || []));
-        await delay(800);
 
-        // Department Distribution
         const departmentDistributionResp = await api.get("/reports/department-distribution");
         if (!active) return;
         setDepartmentDistribution(normalizeRows(departmentDistributionResp.data.data || []));
-        await delay(800);
 
-        // Engineer Performance
         const engineerPerformanceResp = await api.get("/reports/engineer-performance");
         if (!active) return;
         const engineerData = engineerPerformanceResp.data.data || [];
@@ -109,18 +120,19 @@ export function AdminReportsClient() {
       } catch (requestError) {
         if (!active) return;
         setError(requestError instanceof Error ? requestError.message : "Reports could not be loaded.");
-      } finally {
-        if (active) setLoading(false);
       }
     };
 
-    fetchData();
+    fetchAuxiliaryReports();
+    return () => {
+      active = false;
+    };
   }, []);
 
   // Compute charts data for the existing charts (without useMemo)
   const byStatus = normalizeRows(data.charts?.byStatus);
   const byPriority = normalizeRows(data.charts?.byPriority);
-  const ticketTrend = normalizeRows(data.charts?.ticketTrend);
+  const ticketTrend = Array.isArray(data.charts?.ticketTrend) ? data.charts.ticketTrend : [];
   const engineerPerformance = normalizeRows(data.charts?.engineerPerformance);
 
   if (loading) return <div className="rounded-lg border border-slate-200 bg-white p-6 text-sm text-slate-500 shadow-sm">Loading reports...</div>;
@@ -132,7 +144,7 @@ export function AdminReportsClient() {
       <div className="gap-5 xl:grid-cols-2">
         <ReportChart title="Tickets by Status" data={byStatus} type="bar" />
         <ReportChart title="Tickets by Priority" data={byPriority} type="bar" />
-        <ReportChart title="Ticket Trend" data={ticketTrend} type="line" />
+        <TicketTrendChart data={ticketTrend} range={ticketTrendRange} onRangeChange={setTicketTrendRange} />
         <ReportChart title="Engineer Workload" data={engineerPerformance} type="bar" />
       </div>
 
@@ -191,6 +203,50 @@ export function AdminReportsClient() {
         )}
       </div>
     </div>
+  );
+}
+
+function TicketTrendChart({ data, range, onRangeChange }: { data: TicketTrendRow[]; range: TicketTrendRange; onRangeChange: (range: TicketTrendRange) => void }) {
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h2 className="text-base font-semibold text-slate-950">Ticket Trend</h2>
+          <div className="mt-3 flex flex-wrap gap-4 text-xs font-semibold text-slate-600">
+            <span className="inline-flex items-center gap-2"><span className="h-2.5 w-2.5 rounded-full bg-blue-700" />Created Tickets</span>
+            <span className="inline-flex items-center gap-2"><span className="h-2.5 w-2.5 rounded-full bg-emerald-600" />Resolved Tickets</span>
+            <span className="inline-flex items-center gap-2"><span className="h-2.5 w-2.5 rounded-full bg-amber-500" />Open Backlog</span>
+          </div>
+        </div>
+        <div className="inline-flex rounded-md border border-slate-300 bg-slate-50 p-1">
+          {(["24h", "7d", "30d"] as TicketTrendRange[]).map((item) => (
+            <button
+              key={item}
+              type="button"
+              onClick={() => onRangeChange(item)}
+              className={`rounded px-3 py-1.5 text-xs font-semibold transition ${range === item ? "bg-blue-700 text-white" : "text-slate-600 hover:bg-white"}`}
+            >
+              {item}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="mt-4 h-72">
+        {data.length ? (
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={data}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="label" />
+              <YAxis allowDecimals={false} />
+              <Tooltip />
+              <Line type="monotone" dataKey="createdTickets" name="Created Tickets" stroke="#1d4ed8" strokeWidth={2} dot={false} />
+              <Line type="monotone" dataKey="resolvedTickets" name="Resolved Tickets" stroke="#059669" strokeWidth={2} dot={false} />
+              <Line type="monotone" dataKey="openBacklog" name="Open Backlog" stroke="#f59e0b" strokeWidth={2} dot={false} />
+            </LineChart>
+          </ResponsiveContainer>
+        ) : <div className="grid h-full place-items-center text-sm text-slate-500">No ticket trend data yet.</div>}
+      </div>
+    </section>
   );
 }
 

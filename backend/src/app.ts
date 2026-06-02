@@ -18,7 +18,15 @@ export function createApp() {
   }));
   app.use(express.json({ limit: "1mb" }));
   app.use(morgan(env.nodeEnv === "production" ? "combined" : "dev"));
-  app.use(rateLimit({ windowMs: 15 * 60 * 1000, limit: 300 }));
+  app.use(rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 300,
+    skip: (req) => req.method === "OPTIONS" || req.path === "/api/notifications/events",
+    handler: (req, res) => {
+      console.warn(`[rate-limit] ${req.method} ${req.originalUrl} exceeded request limit`);
+      res.status(429).json({ message: `Too many requests for ${req.method} ${req.originalUrl}` });
+    }
+  }));
 
   app.use("/api", apiRouter);
   app.use(notFound);

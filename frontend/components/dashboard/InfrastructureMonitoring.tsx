@@ -55,6 +55,7 @@ export function InfrastructureMonitoring() {
   const [services, setServices] = useState<ServiceHealth[]>([]);
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [range, setRange] = useState<RangeKey>("24h");
+  const [refreshMs, setRefreshMs] = useState(60000);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -87,13 +88,22 @@ export function InfrastructureMonitoring() {
       await load();
     }
 
+    api.get<{ data?: { infrastructure?: { monitoringIntervalSeconds?: number } } }>("/settings")
+      .then(({ data }) => {
+        const seconds = Number(data.data?.infrastructure?.monitoringIntervalSeconds || 60);
+        if (active) setRefreshMs(Math.max(10000, seconds * 1000));
+      })
+      .catch(() => undefined);
     guardedLoad();
-    const refresh = window.setInterval(guardedLoad, 60000);
     return () => {
       active = false;
-      window.clearInterval(refresh);
     };
   }, []);
+
+  useEffect(() => {
+    const refresh = window.setInterval(() => load(range), refreshMs);
+    return () => window.clearInterval(refresh);
+  }, [refreshMs, range]);
 
   useEffect(() => {
     if (!getSessionToken()) return;
@@ -135,6 +145,7 @@ export function InfrastructureMonitoring() {
         {serviceOrder.map((key) => (
           <MonitoringPanel
             key={key}
+            serviceKey={key}
             service={services.find((item) => item.key === key)}
             history={groupedHistory[key] || []}
             loading={loading}
@@ -145,8 +156,8 @@ export function InfrastructureMonitoring() {
   );
 }
 
-function MonitoringPanel({ service, history, loading }: { service?: ServiceHealth; history: HistoryPoint[]; loading: boolean }) {
-  const key = service?.key || "network-health";
+function MonitoringPanel({ serviceKey, service, history, loading }: { serviceKey: ServiceKey; service?: ServiceHealth; history: HistoryPoint[]; loading: boolean }) {
+  const key = service?.key || serviceKey;
   const Icon = icons[key];
   const status = service?.status || "unknown";
   const chartData = history.map((point) => ({

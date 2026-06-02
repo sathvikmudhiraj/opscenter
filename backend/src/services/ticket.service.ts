@@ -377,7 +377,7 @@ export async function createTicket(input: CreateTicketInput) {
     );
     const id = Number(result.outBinds?.id?.[0]);
     await addTicketUpdate(connection, { ticketId: id, actorId: input.requesterId, message: "Ticket created by user.", status: "open" });
-    await notifyAdmins({ title: "New ticket", body: `Ticket #${id} requires triage.` }, connection);
+    await notifyAdmins({ title: "New ticket", body: `Ticket #${id} requires triage.`, category: "ticketAssignment" }, connection);
     await writeAuditLog({ userId: input.requesterId, action: "ticket_created", details: `Ticket #${id} created.` }, connection);
     await connection.commit();
     console.info("[oracle] Ticket insert success");
@@ -452,7 +452,7 @@ export async function saveEngineerAction(input: {
 
     await connection.execute(`UPDATE tickets SET ${updates.join(", ")} WHERE id = :ticketId`, binds);
     await addTicketUpdate(connection, { ticketId: input.ticketId, actorId: input.actorId, message: input.remarks || "Engineer updated service action.", status: input.status });
-    await notifyAdmins({ title: input.status === "resolved" ? "Ticket resolved" : "Ticket updated", body: `Ticket #${input.ticketId} was updated.` }, connection);
+    await notifyAdmins({ title: input.status === "resolved" ? "Ticket resolved" : "Ticket updated", body: `Ticket #${input.ticketId} was updated.`, category: input.status === "resolved" ? "ticketResolution" : "ticketAssignment" }, connection);
     await writeAuditLog({ userId: input.actorId, action: input.status === "resolved" ? "ticket_resolved" : "status_updated", details: `Engineer action saved for ticket #${input.ticketId}.` }, connection);
     await connection.commit();
   } catch (error) {
@@ -479,7 +479,7 @@ export async function assignTicketToEngineer(input: { ticketId: number; engineer
       );
     }
     await addTicketUpdate(connection, { ticketId: input.ticketId, actorId: input.adminId, message: "Engineer assigned.", status: "assigned" });
-    await createNotification({ userId: input.engineerId, title: "Ticket assigned", body: `Ticket #${input.ticketId} has been assigned to you.` }, connection);
+    await createNotification({ userId: input.engineerId, title: "Ticket assigned", body: `Ticket #${input.ticketId} has been assigned to you.`, category: "ticketAssignment" }, connection);
     await writeAuditLog({ userId: input.adminId, action: "ticket_assigned", details: `Ticket #${input.ticketId} assigned to user #${input.engineerId}.` }, connection);
     await connection.commit();
   } catch (error) {

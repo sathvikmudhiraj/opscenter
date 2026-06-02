@@ -6,6 +6,7 @@ import { env } from "../config/env";
 import type { UserRole } from "../types/auth";
 import { HttpError } from "../utils/httpError";
 import { writeAuditLog } from "./audit.service";
+import { getSystemSettings, validatePasswordPolicy } from "./settings.service";
 
 type UserRow = {
   id: number;
@@ -19,9 +20,12 @@ type UserRow = {
 };
 
 type OracleUserRow = Record<string, unknown>;
+const failedLogins = new Map<string, { count: number; lockedUntil: number }>();
 
-function signToken(user: Pick<UserRow, "id" | "name" | "username" | "email" | "role">) {
-  const options: SignOptions = { expiresIn: env.jwtExpiresIn as SignOptions["expiresIn"] };
+function signToken(user: Pick<UserRow, "id" | "name" | "username" | "email" | "role">, sessionTimeoutMinutes?: number) {
+  const options: SignOptions = {
+    expiresIn: sessionTimeoutMinutes ? `${sessionTimeoutMinutes}m` as SignOptions["expiresIn"] : env.jwtExpiresIn as SignOptions["expiresIn"]
+  };
   return jwt.sign({ sub: user.id, username: user.username, email: user.email || user.username, fullName: user.name, role: user.role }, env.jwtSecret, options);
 }
 
@@ -85,6 +89,7 @@ export async function getBootstrapState() {
 export async function setupAdmin(input: { name: string; email: string; password: string }) {
   const connection = await getConnection();
   try {
+    await validatePasswordPolicy(input.password);
     const authColumns = await getUserAuthColumns(connection);
     const usernameColumn = authColumns.usernameColumn.toLowerCase();
     const countResult = await connection.execute("SELECT COUNT(*) AS count FROM users");
@@ -115,7 +120,8 @@ export async function setupAdmin(input: { name: string; email: string; password:
     await writeAuditLog({ userId: id, action: "user_created", details: `${input.email.toLowerCase()} created as first admin.` }, connection);
     await connection.commit();
     const user = { id, name: input.name, username: input.email.toLowerCase(), email: input.email.toLowerCase(), role: "admin" as const };
-    return { token: signToken(user), user };
+    const settings = await getSystemSettings();
+    return { token: signToken(user, settings.security.sessionTimeoutMinutes), user };
   } catch (error) {
     await connection.rollback();
     throw error;
@@ -127,6 +133,12 @@ export async function setupAdmin(input: { name: string; email: string; password:
 export async function login(input: { email: string; password: string }) {
   const connection = await getConnection();
   try {
+    const settings = await getSystemSettings();
+    const loginKey = input.email.toLowerCase();
+    const attempt = failedLogins.get(loginKey);
+    if (attempt && attempt.lockedUntil > Date.now()) {
+      throw new HttpError(423, "Account temporarily locked. Try again later.");
+    }
     const authColumns = await getUserAuthColumns(connection);
     const usernameColumn = authColumns.usernameColumn;
     const idSelect = authColumns.hasId ? "id" : "ROWNUM AS id";
@@ -167,11 +179,20 @@ export async function login(input: { email: string; password: string }) {
     const plainTextTestValid = input.password === storedPassword;
     const valid = bcryptValid || plainTextTestValid;
     console.info(`[auth] Password ${valid ? "valid" : "invalid"} for ${user.username}`);
-    if (!valid) throw new HttpError(401, "Invalid credentials");
+    if (!valid) {
+      const nextCount = (failedLogins.get(loginKey)?.count || 0) + 1;
+      const lockedUntil = nextCount >= settings.security.failedLoginLimit
+        ? Date.now() + settings.security.accountLockoutDurationMinutes * 60 * 1000
+        : 0;
+      failedLogins.set(loginKey, { count: nextCount, lockedUntil });
+      await writeAuditLog({ userId: user.id, action: "login_failed", details: `Failed login ${nextCount}/${settings.security.failedLoginLimit} for ${user.username}.` }, connection);
+      throw new HttpError(401, "Invalid credentials");
+    }
 
     console.info(`[auth] Role detected for ${user.username}: ${user.role}`);
+    failedLogins.delete(loginKey);
     return {
-      token: signToken(user),
+      token: signToken(user, settings.security.sessionTimeoutMinutes),
       user: { id: user.id, name: user.name, username: user.username, email: user.email, role: user.role, forcePasswordChange: user.forcePasswordChange }
     };
   } finally {
