@@ -1,11 +1,26 @@
 "use client";
 
 import { ChangeEvent, useEffect, useMemo, useState } from "react";
-import { Activity, Bell, Building2, Database, HardDrive, Mail, Monitor, Save, Shield, SlidersHorizontal, Wrench } from "lucide-react";
+import { Activity, Bell, Building2, Database, HardDrive, Mail, Monitor, Pencil, Plus, Save, Shield, SlidersHorizontal, Trash2, Wrench, X } from "lucide-react";
 import { api } from "@/lib/api";
 
 type SectionKey = "general" | "sla" | "notifications" | "security" | "assets" | "email" | "infrastructure" | "audit" | "maintenance" | "health";
 type Settings = Record<string, any>;
+type InfrastructureService = {
+  id: string;
+  name: string;
+  url: string;
+  category: string;
+  description: string;
+  supportTeam: string;
+  contactNumber: string;
+  supportEmail: string;
+  escalationNote: string;
+  monitoringEnabled: boolean;
+  isDefault: boolean;
+  createdAt: string | null;
+  updatedAt: string | null;
+};
 
 const tabs: Array<{ key: SectionKey; label: string; icon: any }> = [
   { key: "general", label: "General", icon: Building2 },
@@ -43,20 +58,23 @@ export function SettingsCenter() {
   const [error, setError] = useState("");
   const [health, setHealth] = useState<Record<string, string>>({});
   const [history, setHistory] = useState<any[]>([]);
+  const [infrastructureServices, setInfrastructureServices] = useState<InfrastructureService[]>([]);
 
   async function load() {
     setLoading(true);
     setError("");
     try {
-      const [{ data: settingsResp }, { data: healthResp }, { data: auditResp }] = await Promise.all([
+      const [{ data: settingsResp }, { data: healthResp }, { data: auditResp }, { data: servicesResp }] = await Promise.all([
         api.get<{ data: Settings }>("/settings"),
         api.get<{ data: Record<string, string> }>("/settings/system-health"),
-        api.get<{ data: any[] }>("/settings/audit")
+        api.get<{ data: any[] }>("/settings/audit"),
+        api.get<{ data: InfrastructureService[] }>("/infrastructure-services")
       ]);
       setSettings(settingsResp.data || {});
       setOriginal(settingsResp.data || {});
       setHealth(healthResp.data || {});
       setHistory(auditResp.data || []);
+      setInfrastructureServices(servicesResp.data || []);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Settings could not be loaded.");
     } finally {
@@ -176,7 +194,7 @@ export function SettingsCenter() {
             {active === "security" ? <Security section={section} update={update} /> : null}
             {active === "assets" ? <Assets section={section} update={update} /> : null}
             {active === "email" ? <Email section={section} update={update} testEmail={testEmail} testing={saving === "email-test"} /> : null}
-            {active === "infrastructure" ? <Infrastructure section={section} update={update} /> : null}
+            {active === "infrastructure" ? <Infrastructure section={section} update={update} services={infrastructureServices} reload={load} setToast={setToast} setError={setError} /> : null}
             {active === "audit" ? <Audit section={section} update={update} history={history} /> : null}
             {active === "maintenance" ? <Maintenance section={section} update={update} run={maintenance} saving={saving} /> : null}
             {active === "health" ? <Health health={health} reload={load} /> : null}
@@ -248,8 +266,186 @@ function Email({ section, update, testEmail, testing }: any) {
   return <><Grid><Field label="SMTP Host" value={section.smtpHost} onChange={(v) => update("email.smtpHost", v)} /><Field type="number" label="SMTP Port" value={section.smtpPort} onChange={(v) => update("email.smtpPort", v)} /><Field label="Sender Email" value={section.senderEmail} onChange={(v) => update("email.senderEmail", v)} /><Field label="SMTP Username" value={section.smtpUsername} onChange={(v) => update("email.smtpUsername", v)} /><Field type="password" label="SMTP Password" value={section.smtpPassword} onChange={(v) => update("email.smtpPassword", v)} /></Grid><button type="button" onClick={testEmail} disabled={testing} className="mt-4 rounded-md border border-blue-200 px-3 py-2 text-sm font-semibold text-blue-700 disabled:opacity-50">Test Email</button></>;
 }
 
-function Infrastructure({ section, update }: any) {
-  return <Grid><Field label="HPEP Intranet URL" value={section.hpepIntranetUrl} onChange={(v) => update("infrastructure.hpepIntranetUrl", v)} /><Field label="BHEL Webmail URL" value={section.bhelWebmailUrl} onChange={(v) => update("infrastructure.bhelWebmailUrl", v)} /><Field type="number" label="Monitoring Interval Seconds" value={section.monitoringIntervalSeconds} onChange={(v) => update("infrastructure.monitoringIntervalSeconds", v)} /><Field type="number" label="Slow Response Threshold" value={section.slowResponseThresholdMs} suffix="ms" onChange={(v) => update("infrastructure.slowResponseThresholdMs", v)} /><Field type="number" label="Timeout Threshold" value={section.timeoutThresholdMs} suffix="ms" onChange={(v) => update("infrastructure.timeoutThresholdMs", v)} /><Field type="number" label="Packet Loss Threshold" value={section.packetLossThresholdPercent} suffix="%" onChange={(v) => update("infrastructure.packetLossThresholdPercent", v)} /></Grid>;
+function Infrastructure({ section, update, services, reload, setToast, setError }: any) {
+  const defaultServices = services.filter((service: InfrastructureService) => service.isDefault);
+  const customServices = services.filter((service: InfrastructureService) => !service.isDefault);
+  const [editing, setEditing] = useState<InfrastructureService | null>(null);
+  const [form, setForm] = useState({ name: "", url: "", category: "", description: "", supportTeam: "", contactNumber: "", supportEmail: "", escalationNote: "", monitoringEnabled: true });
+  const [saving, setSaving] = useState(false);
+
+  function startAdd() {
+    setEditing(null);
+    setForm({ name: "", url: "", category: "Custom", description: "", supportTeam: "", contactNumber: "", supportEmail: "", escalationNote: "", monitoringEnabled: true });
+  }
+
+  function startEdit(service: InfrastructureService) {
+    setEditing(service);
+    setForm({
+      name: service.name,
+      url: service.url,
+      category: service.category,
+      description: service.description,
+      supportTeam: service.supportTeam || "",
+      contactNumber: service.contactNumber || "",
+      supportEmail: service.supportEmail || "",
+      escalationNote: service.escalationNote || "",
+      monitoringEnabled: service.monitoringEnabled
+    });
+  }
+
+  function validate() {
+    if (editing?.isDefault) return "";
+    if (!form.name.trim()) return "Service name is required.";
+    if (!form.url.trim()) return "URL is required.";
+    if (!/^https?:\/\//i.test(form.url.trim())) return "URL must start with http:// or https://.";
+    const duplicate = services.some((service: InfrastructureService) => service.url.toLowerCase() === form.url.trim().toLowerCase() && service.id !== editing?.id);
+    if (duplicate) return "A service with this URL already exists.";
+    return "";
+  }
+
+  async function submit() {
+    const validation = validate();
+    if (validation) {
+      setError(validation);
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      if (editing) {
+        await api.put(`/infrastructure-services/${editing.id}`, form);
+        setToast(editing.isDefault ? "Infrastructure support contact updated." : "Infrastructure service updated.");
+      } else {
+        await api.post("/infrastructure-services", form);
+        setToast("Infrastructure service added.");
+      }
+      setEditing(null);
+      setForm({ name: "", url: "", category: "", description: "", supportTeam: "", contactNumber: "", supportEmail: "", escalationNote: "", monitoringEnabled: true });
+      await reload();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Infrastructure service could not be saved.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function remove(service: InfrastructureService) {
+    if (!window.confirm("Are you sure you want to delete this infrastructure service?")) return;
+    setSaving(true);
+    setError("");
+    try {
+      await api.delete(`/infrastructure-services/${service.id}`);
+      setToast("Infrastructure service deleted.");
+      await reload();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Infrastructure service could not be deleted.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function toggle(service: InfrastructureService) {
+    setSaving(true);
+    setError("");
+    try {
+      await api.put(`/infrastructure-services/${service.id}`, { ...service, monitoringEnabled: !service.monitoringEnabled });
+      setToast("Infrastructure monitoring updated.");
+      await reload();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Infrastructure service could not be updated.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const formOpen = editing || form.name || form.url || form.category || form.description || form.supportTeam || form.contactNumber || form.supportEmail || form.escalationNote;
+
+  return (
+    <div className="space-y-6">
+      <Grid><Field label="HPEP Intranet URL" value={section.hpepIntranetUrl} onChange={(v) => update("infrastructure.hpepIntranetUrl", v)} /><Field label="BHEL Webmail URL" value={section.bhelWebmailUrl} onChange={(v) => update("infrastructure.bhelWebmailUrl", v)} /><Field type="number" label="Monitoring Interval Seconds" value={section.monitoringIntervalSeconds} onChange={(v) => update("infrastructure.monitoringIntervalSeconds", v)} /><Field type="number" label="Slow Response Threshold" value={section.slowResponseThresholdMs} suffix="ms" onChange={(v) => update("infrastructure.slowResponseThresholdMs", v)} /><Field type="number" label="Timeout Threshold" value={section.timeoutThresholdMs} suffix="ms" onChange={(v) => update("infrastructure.timeoutThresholdMs", v)} /><Field type="number" label="Packet Loss Threshold" value={section.packetLossThresholdPercent} suffix="%" onChange={(v) => update("infrastructure.packetLossThresholdPercent", v)} /></Grid>
+
+      <section className="rounded-md border border-slate-200 p-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <h3 className="text-base font-semibold text-slate-950">Infrastructure Services</h3>
+          <button type="button" onClick={startAdd} className="inline-flex items-center gap-2 rounded-md bg-blue-700 px-3 py-2 text-sm font-semibold text-white"><Plus className="h-4 w-4" />+ Add Service</button>
+        </div>
+
+        {formOpen ? (
+          <div className="mt-4 rounded-md border border-blue-100 bg-blue-50/60 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm font-semibold text-slate-900">{editing?.isDefault ? "Edit Default Support Contact" : editing ? "Edit Custom Service" : "Add Custom Service"}</p>
+              <button type="button" onClick={() => { setEditing(null); setForm({ name: "", url: "", category: "", description: "", supportTeam: "", contactNumber: "", supportEmail: "", escalationNote: "", monitoringEnabled: true }); }} className="rounded-md border border-slate-300 p-2 text-slate-600"><X className="h-4 w-4" /></button>
+            </div>
+            <div className="mt-4 grid gap-4 md:grid-cols-2">
+              {!editing?.isDefault ? (
+                <>
+                  <Field label="Service Name" value={form.name} onChange={(value) => setForm((current) => ({ ...current, name: value }))} />
+                  <Field label="Service URL" value={form.url} onChange={(value) => setForm((current) => ({ ...current, url: value }))} />
+                  <Field label="Category" value={form.category} onChange={(value) => setForm((current) => ({ ...current, category: value }))} />
+                  <Toggle label="Monitoring Enabled" checked={form.monitoringEnabled} onChange={(value) => setForm((current) => ({ ...current, monitoringEnabled: value }))} />
+                  <label className="block md:col-span-2">
+                    <span className="text-sm font-medium text-slate-700">Description</span>
+                    <textarea value={form.description} onChange={(event) => setForm((current) => ({ ...current, description: event.target.value }))} rows={3} className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-600 focus:ring-4 focus:ring-blue-100" />
+                  </label>
+                </>
+              ) : null}
+              <Field label="Support Team Name" value={form.supportTeam} onChange={(value) => setForm((current) => ({ ...current, supportTeam: value }))} />
+              <Field label="Contact Number / Extension" value={form.contactNumber} onChange={(value) => setForm((current) => ({ ...current, contactNumber: value }))} />
+              <Field label="Support Email" value={form.supportEmail} onChange={(value) => setForm((current) => ({ ...current, supportEmail: value }))} />
+              <label className="block">
+                <span className="text-sm font-medium text-slate-700">Escalation Note</span>
+                <textarea value={form.escalationNote} onChange={(event) => setForm((current) => ({ ...current, escalationNote: event.target.value }))} rows={3} className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-600 focus:ring-4 focus:ring-blue-100" />
+              </label>
+            </div>
+            <div className="mt-4 flex justify-end">
+              <button type="button" onClick={submit} disabled={saving} className="inline-flex items-center gap-2 rounded-md bg-blue-700 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50"><Save className="h-4 w-4" />{editing ? "Save Service" : "Add Service"}</button>
+            </div>
+          </div>
+        ) : null}
+
+        <ServiceGroup title="Default Services" services={defaultServices} onEdit={startEdit} />
+        <ServiceGroup title="Custom Services" services={customServices} onEdit={startEdit} onDelete={remove} onToggle={toggle} saving={saving} />
+      </section>
+    </div>
+  );
+}
+
+function ServiceGroup({ title, services, onEdit, onDelete, onToggle, saving }: { title: string; services: InfrastructureService[]; onEdit?: (service: InfrastructureService) => void; onDelete?: (service: InfrastructureService) => void; onToggle?: (service: InfrastructureService) => void; saving?: boolean }) {
+  return (
+    <div className="mt-5">
+      <h4 className="text-sm font-semibold uppercase tracking-wide text-slate-500">{title}</h4>
+      <div className="mt-3 overflow-x-auto rounded-md border border-slate-200">
+        <table className="min-w-full divide-y divide-slate-200 text-sm">
+          <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+            <tr><th className="px-4 py-3">Service</th><th className="px-4 py-3">URL</th><th className="px-4 py-3">Category</th><th className="px-4 py-3">Monitoring</th><th className="px-4 py-3">Type</th><th className="px-4 py-3">Actions</th></tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {services.map((service) => (
+              <tr key={service.id}>
+                <td className="px-4 py-3"><p className="font-semibold text-slate-950">{service.name}</p><p className="text-xs text-slate-500">{service.description || "No description"}</p></td>
+                <td className="max-w-xs truncate px-4 py-3 text-slate-600">{service.url}</td>
+                <td className="px-4 py-3 text-slate-600">{service.category}</td>
+                <td className="px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${service.monitoringEnabled ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>{service.monitoringEnabled ? "Enabled" : "Disabled"}</span></td>
+                <td className="px-4 py-3"><span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700">{service.isDefault ? "Default" : "Custom"}</span></td>
+                <td className="px-4 py-3">
+                  <div className="flex gap-2">
+                    {!service.isDefault ? (
+                      <>
+                      <button type="button" onClick={() => onToggle?.(service)} disabled={saving} className="rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50">{service.monitoringEnabled ? "Disable" : "Enable"}</button>
+                      <button type="button" onClick={() => onDelete?.(service)} disabled={saving} className="rounded-md border border-red-200 p-1.5 text-red-700 disabled:opacity-50"><Trash2 className="h-4 w-4" /></button>
+                      </>
+                    ) : null}
+                    <button type="button" onClick={() => onEdit?.(service)} disabled={saving} className="rounded-md border border-slate-300 p-1.5 text-slate-700 disabled:opacity-50"><Pencil className="h-4 w-4" /></button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!services.length ? <p className="p-4 text-sm text-slate-500">No services configured.</p> : null}
+      </div>
+    </div>
+  );
 }
 
 function Audit({ section, update, history }: any) {

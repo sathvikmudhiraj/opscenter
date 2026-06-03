@@ -1,7 +1,8 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { Edit3, Plus, Search, Trash2, X } from "lucide-react";
+import { Download, Edit3, Plus, Printer, QrCode, Search, Trash2, X } from "lucide-react";
+import { QRCodeCanvas } from "qrcode.react";
 import { api } from "@/lib/api";
 import { getSessionUser } from "@/lib/auth";
 import type { UserRole } from "@/types/auth";
@@ -34,6 +35,7 @@ type Asset = {
   updatedAt?: string;
 };
 type User = { id: number; name: string; loginId: string; role: UserRole };
+type QrSurface = "edit" | "preview";
 
 const emptyForm = {
   assetTag: "",
@@ -62,15 +64,20 @@ export function AssetInventory({ mode }: { mode: "employee" | "admin" }) {
   const [users, setUsers] = useState<User[]>([]);
   const [form, setForm] = useState(emptyForm);
   const [editing, setEditing] = useState<Asset | null>(null);
+  const [qrAsset, setQrAsset] = useState<Asset | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [message, setMessage] = useState("");
+  const [qrCodeGeneration, setQrCodeGeneration] = useState(false);
   const [filters, setFilters] = useState({ search: "", lifecycle: "all", department: "all", warranty: "all" });
   const user = getSessionUser();
 
   async function load() {
-    const [{ data: assetData }, userResponse] = await Promise.all([
+    const [{ data: assetData }, userResponse, settingsResponse] = await Promise.all([
       api.get<{ data: Asset[] }>(mode === "employee" ? "/assets?mine=true" : "/assets"),
-      mode === "admin" ? api.get<{ data: User[] }>("/users") : Promise.resolve({ data: { data: [] as User[] } })
+      mode === "admin" ? api.get<{ data: User[] }>("/users") : Promise.resolve({ data: { data: [] as User[] } }),
+      mode === "admin"
+        ? api.get<{ data?: { assets?: { qrCodeGeneration?: boolean } } }>("/settings").catch(() => ({ data: { data: { assets: { qrCodeGeneration: false } } } }))
+        : Promise.resolve({ data: { data: { assets: { qrCodeGeneration: false } } } })
     ]);
     if (mode === "employee") {
       console.info("[assets] Employee asset lookup", {
@@ -85,11 +92,16 @@ export function AssetInventory({ mode }: { mode: "employee" | "admin" }) {
     }
     setAssets(assetData.data);
     setUsers(userResponse.data.data);
+    setQrCodeGeneration(Boolean(settingsResponse.data.data?.assets?.qrCodeGeneration));
   }
 
   useEffect(() => {
     load().catch(() => setAssets([]));
   }, []);
+
+  useEffect(() => {
+    if (!qrCodeGeneration) setQrAsset(null);
+  }, [qrCodeGeneration]);
 
   const departments = useMemo(() => ["all", ...Array.from(new Set(assets.map((asset) => asset.department).filter(Boolean)))], [assets]);
   const visible = useMemo(() => {
@@ -181,6 +193,37 @@ export function AssetInventory({ mode }: { mode: "employee" | "admin" }) {
     }
   }
 
+  function downloadQr(asset: Asset, surface: QrSurface) {
+    const canvas = document.getElementById(qrCanvasId(asset, surface)) as HTMLCanvasElement | null;
+    if (!canvas) return;
+    const link = document.createElement("a");
+    link.href = canvas.toDataURL("image/png");
+    link.download = `${asset.assetTag}-qr.png`;
+    link.click();
+  }
+
+  function printQr(asset: Asset, surface: QrSurface) {
+    const canvas = document.getElementById(qrCanvasId(asset, surface)) as HTMLCanvasElement | null;
+    const dataUrl = canvas?.toDataURL("image/png");
+    if (!dataUrl) return;
+    const printWindow = window.open("", "_blank", "width=420,height=560");
+    if (!printWindow) return;
+    printWindow.document.write(`
+      <html>
+        <head><title>${asset.assetTag} QR</title></head>
+        <body style="font-family: Arial, sans-serif; padding: 24px; text-align: center;">
+          <h2 style="margin: 0 0 6px;">${asset.assetTag}</h2>
+          <p style="margin: 0 0 18px;">${asset.assetName || "Asset QR Code"}</p>
+          <img src="${dataUrl}" style="width: 240px; height: 240px;" />
+          <p style="margin-top: 18px; font-family: monospace;">${assetQrPayload(asset)}</p>
+        </body>
+      </html>
+    `);
+    printWindow.document.close();
+    printWindow.focus();
+    printWindow.print();
+  }
+
   return (
     <section className="space-y-5">
       {mode === "admin" ? (
@@ -242,6 +285,11 @@ export function AssetInventory({ mode }: { mode: "employee" | "admin" }) {
                 {mode === "admin" ? (
                   <td className="px-5 py-4">
                     <div className="flex gap-2">
+                      {qrCodeGeneration ? (
+                        <button type="button" onClick={() => setQrAsset(asset)} className="rounded-md border border-blue-200 p-2 text-blue-700 hover:bg-blue-50" aria-label="Preview asset QR code">
+                          <QrCode className="h-4 w-4" />
+                        </button>
+                      ) : null}
                       <button type="button" onClick={() => openEdit(asset)} className="rounded-md border border-slate-300 p-2 text-slate-700 hover:bg-slate-50" aria-label="Edit asset">
                         <Edit3 className="h-4 w-4" />
                       </button>
@@ -295,6 +343,9 @@ export function AssetInventory({ mode }: { mode: "employee" | "admin" }) {
                 <Field label="Storage" value={form.storage} onChange={(storage) => setForm({ ...form, storage })} />
                 <Field label="Operating System" value={form.operatingSystem} onChange={(operatingSystem) => setForm({ ...form, operatingSystem })} />
               </div>
+              {qrCodeGeneration && editing ? (
+                <AssetQrSection asset={editing} surface="edit" onDownload={downloadQr} onPrint={printQr} />
+              ) : null}
               {message ? <p className="rounded-md border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm font-semibold text-red-200">{message}</p> : null}
               <div className="sticky bottom-0 -mx-6 flex justify-end gap-3 border-t border-slate-800 bg-slate-950 px-6 pt-5">
                 <button type="button" onClick={() => setModalOpen(false)} className="rounded-md border border-slate-700 px-4 py-3 text-sm font-semibold text-slate-200 hover:bg-slate-900">Cancel</button>
@@ -304,7 +355,68 @@ export function AssetInventory({ mode }: { mode: "employee" | "admin" }) {
           </div>
         </div>
       ) : null}
+      {qrCodeGeneration && qrAsset ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/70 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-lg overflow-hidden rounded-lg border border-slate-700 bg-slate-950 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-800 px-6 py-4">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-blue-300">Asset QR Code</p>
+                <h2 className="mt-1 text-lg font-semibold text-white">{qrAsset.assetTag}</h2>
+              </div>
+              <button type="button" onClick={() => setQrAsset(null)} className="rounded-md border border-slate-700 p-2 text-slate-300 hover:bg-slate-900">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="space-y-5 p-6">
+              <AssetQrSection asset={qrAsset} surface="preview" onDownload={downloadQr} onPrint={printQr} />
+            </div>
+          </div>
+        </div>
+      ) : null}
     </section>
+  );
+}
+
+function AssetQrSection({ asset, surface, onDownload, onPrint }: { asset: Asset; surface: QrSurface; onDownload: (asset: Asset, surface: QrSurface) => void; onPrint: (asset: Asset, surface: QrSurface) => void }) {
+  return (
+    <section className="rounded-lg border border-slate-800 bg-slate-900/70 p-4">
+      <div className="flex flex-col gap-4 md:flex-row md:items-start">
+        <div className="rounded-md bg-white p-3">
+          <QRCodeCanvas id={qrCanvasId(asset, surface)} value={assetQrPayload(asset)} size={180} includeMargin />
+        </div>
+        <div className="min-w-0 flex-1">
+          <h3 className="text-base font-semibold text-white">QR Code</h3>
+          <p className="mt-1 break-all font-mono text-xs text-blue-200">{assetQrPayload(asset)}</p>
+          <div className="mt-4 grid gap-2 text-sm text-slate-300 sm:grid-cols-2">
+            <Info label="Asset Name" value={asset.assetName} />
+            <Info label="Serial Number" value={asset.serialNumber} />
+            <Info label="Category" value={asset.category} />
+            <Info label="Department" value={asset.department} />
+            <Info label="Location" value={[asset.department, asset.block && `Block ${asset.block}`, asset.room && `Room ${asset.room}`].filter(Boolean).join(" / ")} />
+            <Info label="Assigned Employee" value={asset.assignedToName || asset.assignedToLogin || "Unassigned"} />
+          </div>
+          <div className="mt-5 flex flex-wrap gap-2">
+            <button type="button" onClick={() => onDownload(asset, surface)} className="inline-flex items-center gap-2 rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-500">
+              <Download className="h-4 w-4" />
+              Download QR
+            </button>
+            <button type="button" onClick={() => onPrint(asset, surface)} className="inline-flex items-center gap-2 rounded-md border border-slate-700 px-3 py-2 text-sm font-semibold text-slate-100 hover:bg-slate-900">
+              <Printer className="h-4 w-4" />
+              Print QR
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function Info({ label, value }: { label: string; value?: string | null }) {
+  return (
+    <div className="rounded-md border border-slate-800 bg-slate-950 px-3 py-2">
+      <p className="text-[11px] uppercase tracking-wide text-slate-500">{label}</p>
+      <p className="mt-1 truncate font-semibold text-slate-100">{value || "N/A"}</p>
+    </div>
   );
 }
 
@@ -363,6 +475,15 @@ function warrantyState(value?: string) {
   if (days < 0) return "expired";
   if (days <= 30) return "expiring";
   return "valid";
+}
+
+function assetQrPayload(asset: Asset) {
+  const appUrl = (process.env.NEXT_PUBLIC_APP_URL || "http://10.5.5.178:3000").replace(/\/$/, "");
+  return `${appUrl}/asset/${encodeURIComponent(asset.assetTag)}`;
+}
+
+function qrCanvasId(asset: Asset, surface: QrSurface) {
+  return `asset-qr-${surface}-${String(asset.id || asset.assetTag).replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 }
 
 function WarrantyBadge({ value }: { value?: string }) {

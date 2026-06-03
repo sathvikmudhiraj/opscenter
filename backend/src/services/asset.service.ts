@@ -183,6 +183,66 @@ export async function listAssets(input: { assignedToUserId?: number; requester?:
   }
 }
 
+export async function getPublicAssetVerification(assetId: string) {
+  const connection = await getConnection();
+  try {
+    const assetColumns = await getAssetColumns(connection);
+    const userColumns = await getUserColumns(connection);
+    const assignedSelect = assetColumns.assignedColumn ? `a.${assetColumns.assignedColumn}` : "NULL";
+    const assignedJoin = assetColumns.assignedColumn ? `LEFT JOIN users u ON u.id = a.${assetColumns.assignedColumn}` : "";
+    const result = await connection.execute(
+      `SELECT a.id,
+              a.asset_tag,
+              a.asset_name,
+              a.category,
+              ${selectIf(assetColumns.columns, "type", "a.category")},
+              a.status,
+              ${selectIf(assetColumns.columns, "brand")},
+              ${selectIf(assetColumns.columns, "model")},
+              ${selectIf(assetColumns.columns, "serial_number")},
+              ${selectIf(assetColumns.columns, "warranty_expiry")},
+              ${selectIf(assetColumns.columns, "department")},
+              ${selectIf(assetColumns.columns, "block")},
+              ${selectIf(assetColumns.columns, "room")},
+              ${selectIf(assetColumns.columns, "location")},
+              ${assignedSelect} AS assigned_to,
+              ${selectIf(assetColumns.columns, "lifecycle_state")},
+              ${assetColumns.assignedColumn ? `u.${userColumns.nameExpression}` : "NULL"} AS assigned_to_name,
+              ${assetColumns.assignedColumn ? `u.${userColumns.usernameColumn}` : "NULL"} AS assigned_to_login
+       FROM assets a
+       ${assignedJoin}
+       WHERE UPPER(a.asset_tag) = UPPER(:assetId)
+       FETCH FIRST 1 ROWS ONLY`,
+      { assetId }
+    );
+    const row = (result.rows || [])[0] as any | undefined;
+    if (!row) return null;
+    const asset = normalizeAsset(row);
+    return {
+      assetTag: asset.assetTag,
+      assetName: asset.assetName,
+      serialNumber: asset.serialNumber,
+      category: asset.category,
+      type: asset.type,
+      brand: asset.brand,
+      model: asset.model,
+      lifecycleState: asset.lifecycleState,
+      department: asset.department,
+      block: asset.block,
+      room: asset.room,
+      location: asset.location,
+      assignedEmployee: asset.assignedToName || asset.assignedToLogin || "Unassigned",
+      warrantyExpiry: asset.warrantyExpiry,
+      verificationStatus: "verified"
+    };
+  } catch (error) {
+    console.info(`[oracle] Public asset verification failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    throw error;
+  } finally {
+    await connection.close();
+  }
+}
+
 export async function createAsset(input: AssetInput & { actorId: number }) {
   const connection = await getConnection();
   try {

@@ -1,19 +1,19 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, AlertTriangle, Download, Globe2, Mail, Network, ShieldCheck, Timer, WifiOff } from "lucide-react";
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api } from "@/lib/api";
 import { getSessionToken } from "@/lib/auth";
 
-type ServiceKey = "hpep-intranet" | "bhel-webmail" | "network-health";
+type ServiceKey = string;
 type RangeKey = "24h" | "7d" | "30d";
-type StatusFilter = "all" | "healthy" | "degraded" | "critical" | "no_data";
+type StatusFilter = "all" | "healthy" | "degraded" | "critical" | "disabled" | "no_data";
 
 type ServiceHealth = {
   key: ServiceKey;
   serviceName: string;
-  status: "healthy" | "online" | "slow" | "offline" | "unknown";
+  status: "healthy" | "online" | "slow" | "offline" | "unknown" | "disabled";
   statusLabel: string;
   responseTimeMs: number | null;
   latencyMs: number | null;
@@ -24,6 +24,13 @@ type ServiceHealth = {
   availabilityPercent: number;
   incidentCount: number;
   message: string;
+  url?: string;
+  monitoringEnabled?: boolean;
+  isDefault?: boolean;
+  supportTeam?: string;
+  contactNumber?: string;
+  supportEmail?: string;
+  escalationNote?: string;
   internetStatus?: string;
   overallNetworkHealth?: string;
 };
@@ -66,6 +73,10 @@ type Incident = {
   responseTimeMs: number | null;
   latencyMs: number | null;
   packetLossPercent: number | null;
+  supportTeam?: string;
+  contactNumber?: string;
+  supportEmail?: string;
+  escalationNote?: string;
 };
 
 type ReportRow = {
@@ -76,11 +87,13 @@ type ReportRow = {
   totalDowntimeMinutes: number;
   incidentCount: number;
   totalChecks: number;
+  supportTeam?: string;
+  contactNumber?: string;
 };
 
 const ranges: RangeKey[] = ["24h", "7d", "30d"];
 const serviceOrder: ServiceKey[] = ["hpep-intranet", "bhel-webmail", "network-health"];
-const icons = { "hpep-intranet": Globe2, "bhel-webmail": Mail, "network-health": Network };
+const icons: Record<string, React.ElementType> = { "hpep-intranet": Globe2, "bhel-webmail": Mail, "network-health": Network };
 
 export function InfrastructureMonitoringPage() {
   const [range, setRange] = useState<RangeKey>("24h");
@@ -94,13 +107,17 @@ export function InfrastructureMonitoringPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [refreshMs, setRefreshMs] = useState(60000);
+  const inFlightRef = useRef(false);
+  const initialLoadRef = useRef(false);
 
   async function load(selectedRange = range) {
+    if (inFlightRef.current) return;
     if (!getSessionToken()) {
       setError("");
       setLoading(false);
       return;
     }
+    inFlightRef.current = true;
     try {
       const [currentResp, historyResp, heatmapResp, incidentsResp, reportsResp] = await Promise.all([
         api.get<{ data: ServiceHealth[] }>("/infrastructure/current"),
@@ -119,6 +136,7 @@ export function InfrastructureMonitoringPage() {
       setError(requestError instanceof Error ? requestError.message : "Infrastructure monitoring could not be loaded.");
     } finally {
       setLoading(false);
+      inFlightRef.current = false;
     }
   }
 
@@ -133,6 +151,7 @@ export function InfrastructureMonitoringPage() {
         if (active) setRefreshMs(Math.max(10000, seconds * 1000));
       })
       .catch(() => undefined);
+    initialLoadRef.current = true;
     guardedLoad();
     return () => {
       active = false;
@@ -145,6 +164,10 @@ export function InfrastructureMonitoringPage() {
   }, [refreshMs, range]);
 
   useEffect(() => {
+    if (initialLoadRef.current) {
+      initialLoadRef.current = false;
+      return;
+    }
     setLoading(true);
     load(range);
   }, [range]);
@@ -153,23 +176,32 @@ export function InfrastructureMonitoringPage() {
     const healthy = current.filter((item) => item.status === "healthy" || item.status === "online").length;
     const degraded = current.filter((item) => item.status === "slow" || item.status === "unknown").length;
     const offline = current.filter((item) => item.status === "offline").length;
-    const responseValues = current.map((item) => item.responseTimeMs ?? item.latencyMs).filter((item): item is number => item !== null && item !== undefined);
+    const responseValues = current.filter((item) => item.status !== "disabled").map((item) => item.responseTimeMs ?? item.latencyMs).filter((item): item is number => item !== null && item !== undefined);
     const network = current.find((item) => item.key === "network-health");
     return {
       total: current.length,
       healthy,
       degraded,
       offline,
-      incidents: current.reduce((sum, item) => sum + item.incidentCount, 0),
+      incidents: current.filter((item) => item.status !== "disabled").reduce((sum, item) => sum + item.incidentCount, 0),
       averageResponse: responseValues.length ? Math.round(responseValues.reduce((sum, value) => sum + value, 0) / responseValues.length) : 0,
       networkScore: network ? Math.max(0, Math.round(network.availabilityPercent - (network.packetLossPercent || 0))) : 0
     };
   }, [current]);
 
-  const historyByService = useMemo(() => Object.fromEntries(serviceOrder.map((key) => [
+  const orderedServices = useMemo(() => {
+    const defaults = serviceOrder
+      .map((key) => current.find((item) => item.key === key) || ({ key, serviceName: labelForService(key), status: "unknown", statusLabel: "Unknown", responseTimeMs: null, latencyMs: null, packetLossPercent: null, dnsStatus: null, dnsResponseTimeMs: null, lastCheckedAt: "", availabilityPercent: 0, incidentCount: 0, message: "Waiting for Oracle monitoring data", isDefault: true, supportTeam: defaultSupportFor(key).supportTeam, contactNumber: defaultSupportFor(key).contactNumber, escalationNote: defaultSupportFor(key).escalationNote } as ServiceHealth));
+    const custom = current.filter((item) => !serviceOrder.includes(item.key));
+    return [...defaults, ...custom];
+  }, [current]);
+
+  const dynamicServiceKeys = orderedServices.map((service) => service.key);
+
+  const historyByService = useMemo(() => Object.fromEntries(dynamicServiceKeys.map((key) => [
     key,
     history.filter((point) => point.serviceKey === key)
-  ])) as Record<ServiceKey, HistoryPoint[]>, [history]);
+  ])) as Record<ServiceKey, HistoryPoint[]>, [history, dynamicServiceKeys.join("|")]);
 
   const filteredHeatmap = heatmap.filter((point) => {
     if (serviceFilter !== "all" && point.serviceKey !== serviceFilter) return false;
@@ -201,12 +233,12 @@ export function InfrastructureMonitoringPage() {
       </div>
 
       <div className="grid gap-4 xl:grid-cols-3">
-        {serviceOrder.map((key) => (
+        {orderedServices.map((service) => (
           <ServiceDashboard
-            key={key}
-            serviceKey={key}
-            service={current.find((item) => item.key === key)}
-            history={historyByService[key] || []}
+            key={service.key}
+            serviceKey={service.key}
+            service={service}
+            history={historyByService[service.key] || []}
             range={range}
             loading={loading}
           />
@@ -218,13 +250,14 @@ export function InfrastructureMonitoringPage() {
         range={range}
         serviceFilter={serviceFilter}
         statusFilter={statusFilter}
+        services={orderedServices}
         onServiceFilter={setServiceFilter}
         onStatusFilter={setStatusFilter}
       />
 
       <div className="grid gap-5 xl:grid-cols-[1fr_1.25fr]">
         <IncidentTimeline incidents={incidents} />
-        <AvailabilityReports reports={reports} />
+        <AvailabilityReports reports={reports} services={orderedServices} />
       </div>
     </div>
   );
@@ -267,12 +300,14 @@ function OverviewCard({ label, value, icon: Icon, tone = "blue" }: { label: stri
 
 function ServiceDashboard({ serviceKey, service, history, range, loading }: { serviceKey: ServiceKey; service?: ServiceHealth; history: HistoryPoint[]; range: RangeKey; loading: boolean }) {
   const key = service?.key || serviceKey;
-  const Icon = icons[key];
+  const Icon = icons[key] || Globe2;
   const chartData = history.map((point) => ({
     label: new Date(point.checkedAt).toLocaleDateString([], range === "24h" ? { hour: "2-digit", minute: "2-digit" } : { month: "short", day: "numeric" }),
     value: key === "network-health" ? point.latencyMs ?? point.responseTimeMs ?? 0 : point.responseTimeMs ?? 0,
     status: point.status
   }));
+  const needsAction = service ? isActionRequired(service.status) : false;
+  const hasSupport = Boolean(service?.supportTeam || service?.contactNumber || service?.supportEmail || service?.escalationNote);
 
   return (
     <article className="rounded-lg border border-slate-800 bg-slate-950 p-5">
@@ -287,7 +322,14 @@ function ServiceDashboard({ serviceKey, service, history, range, loading }: { se
         <StatusBadge status={service?.status || "unknown"} label={loading ? "Checking" : service?.statusLabel || "Unknown"} />
       </div>
       <div className="mt-4 grid grid-cols-2 gap-3">
-        {key === "network-health" ? (
+        {service?.status === "disabled" ? (
+          <>
+            <Metric label="Availability" value="N/A" />
+            <Metric label="Response Time" value="N/A" />
+            <Metric label="Last Checked" value="N/A" />
+            <Metric label="Incidents" value="N/A" />
+          </>
+        ) : key === "network-health" ? (
           <>
             <Metric label="Internet" value={service?.internetStatus || "N/A"} />
             <Metric label="Latency" value={formatMs(service?.latencyMs)} />
@@ -305,6 +347,13 @@ function ServiceDashboard({ serviceKey, service, history, range, loading }: { se
           </>
         )}
       </div>
+      {needsAction ? (
+        <ActionRequired service={service} />
+      ) : hasSupport ? (
+        <p className="mt-4 rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-400">
+          Support: {service?.supportTeam || "Support contact not configured"}{service?.contactNumber ? ` | Ext: ${service.contactNumber}` : ""}
+        </p>
+      ) : null}
       <div className="mt-5 h-52">
         {chartData.length ? <HistoryChart data={chartData} /> : <EmptyChart />}
       </div>
@@ -326,19 +375,26 @@ function HistoryChart({ data }: { data: Array<{ label: string; value: number; st
   );
 }
 
-function HeatmapSection({ points, range, serviceFilter, statusFilter, onServiceFilter, onStatusFilter }: {
+function HeatmapSection({ points, range, serviceFilter, statusFilter, services, onServiceFilter, onStatusFilter }: {
   points: HeatmapPoint[];
   range: RangeKey;
   serviceFilter: ServiceKey | "all";
   statusFilter: StatusFilter;
+  services: ServiceHealth[];
   onServiceFilter: (value: ServiceKey | "all") => void;
   onStatusFilter: (value: StatusFilter) => void;
 }) {
-  const grouped = serviceOrder.map((key) => ({
-    key,
-    name: points.find((point) => point.serviceKey === key)?.serviceName || labelForService(key),
-    points: points.filter((point) => point.serviceKey === key)
-  })).filter((item) => serviceFilter === "all" || item.key === serviceFilter);
+  const grouped = services.map((service) => ({
+    key: service.key,
+    name: service.serviceName,
+    disabled: service.status === "disabled",
+    points: service.status === "disabled" ? [] : points.filter((point) => point.serviceKey === service.key)
+  })).filter((item) => serviceFilter === "all" || item.key === serviceFilter).filter((item) => statusFilter !== "disabled" || item.disabled);
+
+  const visibleGrouped = statusFilter === "disabled" ? grouped : grouped.map((service) => ({
+    ...service,
+    points: statusFilter === "all" ? service.points : service.points.filter((point) => point.status === statusFilter)
+  }));
 
   return (
     <section className="rounded-lg border border-slate-800 bg-slate-950 p-5">
@@ -350,23 +406,25 @@ function HeatmapSection({ points, range, serviceFilter, statusFilter, onServiceF
         <div className="flex flex-wrap gap-2">
           <select value={serviceFilter} onChange={(event) => onServiceFilter(event.target.value as ServiceKey | "all")} className="rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100">
             <option value="all">All services</option>
-            {serviceOrder.map((key) => <option key={key} value={key}>{labelForService(key)}</option>)}
+            {services.map((service) => <option key={service.key} value={service.key}>{service.serviceName}</option>)}
           </select>
           <select value={statusFilter} onChange={(event) => onStatusFilter(event.target.value as StatusFilter)} className="rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100">
             <option value="all">All statuses</option>
-            <option value="healthy">Healthy / Online</option>
-            <option value="degraded">Slow / Degraded</option>
-            <option value="critical">Offline / Critical</option>
-            <option value="no_data">No data</option>
+            <option value="healthy">Online</option>
+            <option value="critical">Offline</option>
+            <option value="degraded">Slow</option>
+            <option value="disabled">Disabled</option>
           </select>
         </div>
       </div>
       <div className="mt-5 space-y-4">
-        {grouped.map((service) => (
+        {visibleGrouped.map((service) => (
           <div key={service.key}>
             <p className="mb-2 text-sm font-semibold text-slate-200">{service.name}</p>
             <div className="grid gap-1" style={{ gridTemplateColumns: `repeat(${range === "24h" ? 24 : range === "7d" ? 7 : 30}, minmax(0, 1fr))` }}>
-              {service.points.length ? service.points.map((point) => (
+              {service.disabled ? Array.from({ length: range === "24h" ? 24 : range === "7d" ? 7 : 30 }).map((_, index) => (
+                <div key={index} className="h-5 rounded-sm bg-slate-600" title="Monitoring Disabled" />
+              )) : service.points.length ? service.points.map((point) => (
                 <div key={`${point.serviceKey}-${point.bucket}`} title={`${point.bucket}: ${point.status}`} className={`h-5 rounded-sm ${heatClass(point.status)}`} />
               )) : Array.from({ length: range === "24h" ? 24 : range === "7d" ? 7 : 30 }).map((_, index) => (
                 <div key={index} className="h-5 rounded-sm bg-slate-700" title="No data" />
@@ -390,6 +448,9 @@ function IncidentTimeline({ incidents }: { incidents: Incident[] }) {
               <div>
                 <p className="font-semibold text-slate-100">{incident.type}</p>
                 <p className="mt-1 text-sm text-slate-400">{incident.serviceName} - {incident.message}</p>
+                {isActionRequired(incident.status) ? (
+                  <p className="mt-2 text-xs font-semibold text-amber-200">{supportLine(incident)}</p>
+                ) : null}
               </div>
               <span className="text-xs text-slate-500">{formatDate(incident.checkedAt)}</span>
             </div>
@@ -401,18 +462,36 @@ function IncidentTimeline({ incidents }: { incidents: Incident[] }) {
   );
 }
 
-function AvailabilityReports({ reports }: { reports: ReportRow[] }) {
+function AvailabilityReports({ reports, services }: { reports: ReportRow[]; services: ServiceHealth[] }) {
+  const rows = services.map((service) => {
+    const report = reports.find((row) => row.serviceKey === service.key);
+    return {
+      serviceKey: service.key,
+      serviceName: service.serviceName,
+      disabled: service.status === "disabled",
+      availabilityPercent: report?.availabilityPercent ?? service.availabilityPercent ?? 0,
+      averageResponseTimeMs: report?.averageResponseTimeMs ?? service.responseTimeMs ?? service.latencyMs ?? null,
+      totalDowntimeMinutes: report?.totalDowntimeMinutes ?? 0,
+      incidentCount: report?.incidentCount ?? 0,
+      totalChecks: report?.totalChecks ?? 0,
+      supportTeam: report?.supportTeam || service.supportTeam || "",
+      contactNumber: report?.contactNumber || service.contactNumber || ""
+    };
+  });
+
   function exportCsv() {
-    const header = "Service,Availability %,Average Response ms,Total Downtime Minutes,Incident Count,Checks";
-    const rows = reports.map((row) => [
+    const header = "Service,Support Team,Contact Number,Availability %,Average Response ms,Total Downtime Minutes,Incident Count,Checks";
+    const csvRows = rows.map((row) => [
       row.serviceName,
-      row.availabilityPercent,
-      row.averageResponseTimeMs ?? "",
-      row.totalDowntimeMinutes,
-      row.incidentCount,
+      row.supportTeam,
+      row.contactNumber,
+      row.disabled ? "Disabled" : row.availabilityPercent,
+      row.disabled ? "" : row.averageResponseTimeMs ?? "",
+      row.disabled ? "" : row.totalDowntimeMinutes,
+      row.disabled ? "" : row.incidentCount,
       row.totalChecks
     ].join(","));
-    const blob = new Blob([[header, ...rows].join("\n")], { type: "text/csv" });
+    const blob = new Blob([[header, ...csvRows].join("\n")], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
@@ -439,6 +518,8 @@ function AvailabilityReports({ reports }: { reports: ReportRow[] }) {
           <thead className="text-left text-xs uppercase tracking-wide text-slate-500">
             <tr>
               <th className="py-3 pr-4">Service</th>
+              <th className="py-3 pr-4">Support Team</th>
+              <th className="py-3 pr-4">Contact</th>
               <th className="py-3 pr-4">Availability</th>
               <th className="py-3 pr-4">Avg Response</th>
               <th className="py-3 pr-4">Downtime</th>
@@ -446,13 +527,15 @@ function AvailabilityReports({ reports }: { reports: ReportRow[] }) {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-800 text-slate-300">
-            {reports.map((row) => (
+            {rows.map((row) => (
               <tr key={row.serviceKey}>
                 <td className="py-3 pr-4 font-semibold text-white">{row.serviceName}</td>
-                <td className="py-3 pr-4">{row.availabilityPercent}%</td>
-                <td className="py-3 pr-4">{formatMs(row.averageResponseTimeMs)}</td>
-                <td className="py-3 pr-4">{row.totalDowntimeMinutes}m</td>
-                <td className="py-3 pr-4">{row.incidentCount}</td>
+                <td className="py-3 pr-4">{row.supportTeam || "Not configured"}</td>
+                <td className="py-3 pr-4">{row.contactNumber || "Not configured"}</td>
+                <td className="py-3 pr-4">{row.disabled ? "Monitoring Disabled" : `${row.availabilityPercent}%`}</td>
+                <td className="py-3 pr-4">{row.disabled ? "N/A" : formatMs(row.averageResponseTimeMs)}</td>
+                <td className="py-3 pr-4">{row.disabled ? "N/A" : `${row.totalDowntimeMinutes}m`}</td>
+                <td className="py-3 pr-4">{row.disabled ? "N/A" : row.incidentCount}</td>
               </tr>
             ))}
           </tbody>
@@ -466,8 +549,27 @@ function Metric({ label, value }: { label: string; value: string }) {
   return <div className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2"><p className="text-[11px] uppercase tracking-wide text-slate-500">{label}</p><p className="mt-1 truncate text-sm font-semibold text-slate-100">{value}</p></div>;
 }
 
+function ActionRequired({ service }: { service?: Partial<ServiceHealth> }) {
+  const configured = Boolean(service?.supportTeam || service?.contactNumber || service?.supportEmail || service?.escalationNote);
+  return (
+    <div className="mt-4 rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-3 text-sm">
+      <p className="font-semibold text-amber-100">Action Required</p>
+      {configured ? (
+        <div className="mt-2 space-y-1 text-xs font-semibold text-amber-50/90">
+          <p>Contact: {service?.supportTeam || "Support contact not configured"}</p>
+          <p>Phone/Ext: {service?.contactNumber || "Support contact not configured"}</p>
+          {service?.supportEmail ? <p>Email: {service.supportEmail}</p> : null}
+          {service?.escalationNote ? <p>Note: {service.escalationNote}</p> : null}
+        </div>
+      ) : (
+        <p className="mt-2 text-xs font-semibold text-amber-100">Support contact not configured</p>
+      )}
+    </div>
+  );
+}
+
 function StatusBadge({ status, label }: { status: string; label: string }) {
-  const classes = status === "healthy" || status === "online" ? "border-emerald-400/40 bg-emerald-400/10 text-emerald-200" : status === "slow" || status === "unknown" ? "border-amber-400/40 bg-amber-400/10 text-amber-200" : "border-red-400/40 bg-red-400/10 text-red-200";
+  const classes = status === "disabled" ? "border-slate-400/40 bg-slate-400/10 text-slate-200" : status === "healthy" || status === "online" ? "border-emerald-400/40 bg-emerald-400/10 text-emerald-200" : status === "slow" || status === "unknown" ? "border-amber-400/40 bg-amber-400/10 text-amber-200" : "border-red-400/40 bg-red-400/10 text-red-200";
   return <span className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${classes}`}>{label}</span>;
 }
 
@@ -490,7 +592,25 @@ function heatClass(status: string) {
 function labelForService(key: ServiceKey) {
   if (key === "hpep-intranet") return "HPEP Intranet";
   if (key === "bhel-webmail") return "BHEL Webmail";
-  return "Network Health";
+  if (key === "network-health") return "Network Health";
+  return key;
+}
+
+function defaultSupportFor(key: ServiceKey) {
+  if (key === "hpep-intranet") return { supportTeam: "IT Network Team", contactNumber: "", escalationNote: "Contact IT Network Team if HPEP Intranet is slow, offline, or down." };
+  if (key === "bhel-webmail") return { supportTeam: "Mail/Admin Team", contactNumber: "", escalationNote: "Contact Mail/Admin Team if BHEL Webmail is slow, offline, or down." };
+  return { supportTeam: "Network Team", contactNumber: "", escalationNote: "Contact Network Team if network health is degraded or critical." };
+}
+
+function isActionRequired(status?: string) {
+  return status === "slow" || status === "offline" || status === "unknown";
+}
+
+function supportLine(item: { supportTeam?: string; contactNumber?: string }) {
+  if (item.supportTeam && item.contactNumber) return `Contact ${item.supportTeam} at ${item.contactNumber}.`;
+  if (item.supportTeam) return `Contact ${item.supportTeam}.`;
+  if (item.contactNumber) return `Phone/Ext: ${item.contactNumber}.`;
+  return "Support contact not configured";
 }
 
 function formatMs(value?: number | null) {

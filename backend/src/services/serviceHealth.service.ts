@@ -3,16 +3,23 @@ import { getConnection } from "../config/database";
 import { writeAuditLog } from "./audit.service";
 import { notifyAdmins } from "./notification.service";
 import { getSystemSettings, type SystemSettings } from "./settings.service";
+import { getCustomInfrastructureServices, getDefaultInfrastructureServicesWithSupport, type InfrastructureService } from "./infrastructureServices.service";
 
-type ServiceKey = "hpep-intranet" | "bhel-webmail" | "network-health";
-type ServiceStatus = "healthy" | "online" | "slow" | "offline" | "unknown";
+type ServiceKey = string;
+type ServiceStatus = "healthy" | "online" | "slow" | "offline" | "unknown" | "disabled";
 type RangeKey = "24h" | "7d" | "30d";
 
 type ServiceDefinition = {
-  key: Exclude<ServiceKey, "network-health">;
+  key: ServiceKey;
   name: string;
   url: string;
   onlineLabel: "Healthy" | "Online";
+  monitoringEnabled: boolean;
+  isDefault: boolean;
+  supportTeam: string;
+  contactNumber: string;
+  supportEmail: string;
+  escalationNote: string;
 };
 
 export type ServiceHealthSnapshot = {
@@ -31,6 +38,13 @@ export type ServiceHealthSnapshot = {
   availabilityPercent: number;
   incidentCount: number;
   message: string;
+  url?: string;
+  monitoringEnabled?: boolean;
+  isDefault?: boolean;
+  supportTeam?: string;
+  contactNumber?: string;
+  supportEmail?: string;
+  escalationNote?: string;
   internetStatus?: string;
   overallNetworkHealth?: string;
 };
@@ -48,12 +62,17 @@ export type ServiceHealthHistoryPoint = {
   dnsResponseTimeMs: number | null;
   availabilityPercent: number;
   errorMessage: string | null;
+  supportTeam: string;
+  contactNumber: string;
+  supportEmail: string;
+  escalationNote: string;
 };
 
 const previousStatus = new Map<ServiceKey, ServiceStatus>();
 const lastSuccessfulChecks = new Map<ServiceKey, string>();
 const networkProbeUrl = "https://www.google.com/generate_204";
 const dnsProbeHost = "google.com";
+const defaultServiceOrder = ["hpep-intranet", "bhel-webmail", "network-health"];
 
 function servicesFromSettings(settings: SystemSettings): ServiceDefinition[] {
   return [
@@ -61,15 +80,62 @@ function servicesFromSettings(settings: SystemSettings): ServiceDefinition[] {
       key: "hpep-intranet",
       name: "HPEP Intranet",
       url: settings.infrastructure.hpepIntranetUrl,
-      onlineLabel: "Healthy"
+      onlineLabel: "Healthy",
+      monitoringEnabled: true,
+      isDefault: true,
+      supportTeam: "IT Network Team",
+      contactNumber: "",
+      supportEmail: "",
+      escalationNote: "Contact IT Network Team if HPEP Intranet is slow, offline, or down."
     },
     {
       key: "bhel-webmail",
       name: "BHEL Webmail",
       url: settings.infrastructure.bhelWebmailUrl,
-      onlineLabel: "Online"
+      onlineLabel: "Online",
+      monitoringEnabled: true,
+      isDefault: true,
+      supportTeam: "Mail/Admin Team",
+      contactNumber: "",
+      supportEmail: "",
+      escalationNote: "Contact Mail/Admin Team if BHEL Webmail is slow, offline, or down."
     }
   ];
+}
+
+function customServiceDefinition(service: InfrastructureService): ServiceDefinition {
+  return {
+    key: `custom-${service.id}`,
+    name: service.name,
+    url: service.url,
+    onlineLabel: "Online",
+    monitoringEnabled: service.monitoringEnabled,
+    isDefault: false,
+    supportTeam: service.supportTeam,
+    contactNumber: service.contactNumber,
+    supportEmail: service.supportEmail,
+    escalationNote: service.escalationNote
+  };
+}
+
+function defaultServiceDefinition(service: InfrastructureService, settings: SystemSettings): ServiceDefinition {
+  const url = service.id === "hpep-intranet"
+    ? settings.infrastructure.hpepIntranetUrl
+    : service.id === "bhel-webmail"
+      ? settings.infrastructure.bhelWebmailUrl
+      : service.url;
+  return {
+    key: service.id,
+    name: service.name,
+    url,
+    onlineLabel: service.id === "bhel-webmail" ? "Online" : "Healthy",
+    monitoringEnabled: service.monitoringEnabled,
+    isDefault: true,
+    supportTeam: service.supportTeam,
+    contactNumber: service.contactNumber,
+    supportEmail: service.supportEmail,
+    escalationNote: service.escalationNote
+  };
 }
 
 function normalizeRange(range: unknown): RangeKey {
@@ -96,6 +162,7 @@ function bucketFor(value: unknown, range: RangeKey) {
 }
 
 function statusLabelFor(service: ServiceDefinition, status: ServiceStatus) {
+  if (status === "disabled") return "Monitoring Disabled";
   if (status === "healthy" || status === "online") return service.onlineLabel;
   if (status === "slow") return "Slow";
   if (status === "unknown") return "Cannot verify";
@@ -103,6 +170,7 @@ function statusLabelFor(service: ServiceDefinition, status: ServiceStatus) {
 }
 
 function availabilityFor(status: ServiceStatus) {
+  if (status === "disabled") return 0;
   if (status === "offline") return 0;
   if (status === "unknown") return 0;
   if (status === "slow") return 95;
@@ -118,7 +186,10 @@ async function ensureServiceHealthHistoryTable(connection: any) {
     `SELECT COUNT(*) AS count FROM user_tables WHERE table_name = 'SERVICE_HEALTH_HISTORY'`
   );
   const exists = Number(((result.rows || [])[0] as { COUNT?: number })?.COUNT || 0) > 0;
-  if (exists) return;
+  if (exists) {
+    await ensureServiceHealthHistoryColumns(connection);
+    return;
+  }
 
   await connection.execute(
     `CREATE TABLE service_health_history (
@@ -134,6 +205,10 @@ async function ensureServiceHealthHistoryTable(connection: any) {
       dns_response_time_ms NUMBER,
       availability_percent NUMBER(5,2),
       error_message VARCHAR2(1000),
+      support_team VARCHAR2(160),
+      contact_number VARCHAR2(80),
+      support_email VARCHAR2(160),
+      escalation_note VARCHAR2(1000),
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
     )`
   );
@@ -141,33 +216,62 @@ async function ensureServiceHealthHistoryTable(connection: any) {
   await connection.commit();
 }
 
+async function ensureServiceHealthHistoryColumns(connection: any) {
+  const result = await connection.execute(
+    `SELECT column_name FROM user_tab_columns WHERE table_name = 'SERVICE_HEALTH_HISTORY'`
+  );
+  const columns = new Set(((result.rows || []) as Array<{ COLUMN_NAME: string }>).map((row) => row.COLUMN_NAME));
+  const additions: Array<[string, string]> = [
+    ["SUPPORT_TEAM", "support_team VARCHAR2(160)"],
+    ["CONTACT_NUMBER", "contact_number VARCHAR2(80)"],
+    ["SUPPORT_EMAIL", "support_email VARCHAR2(160)"],
+    ["ESCALATION_NOTE", "escalation_note VARCHAR2(1000)"]
+  ];
+  for (const [column, ddl] of additions) {
+    if (!columns.has(column)) {
+      await connection.execute(`ALTER TABLE service_health_history ADD (${ddl})`);
+    }
+  }
+}
+
+function supportSummary(input: { supportTeam?: string; contactNumber?: string }) {
+  if (!input.supportTeam && !input.contactNumber) return "";
+  if (input.supportTeam && input.contactNumber) return `Contact ${input.supportTeam} at ${input.contactNumber}.`;
+  if (input.supportTeam) return `Contact ${input.supportTeam}.`;
+  return `Phone/Ext: ${input.contactNumber}.`;
+}
+
 async function recordOfflineTransition(connection: any, snapshot: ServiceHealthSnapshot) {
   const priorStatus = previousStatus.get(snapshot.key);
   previousStatus.set(snapshot.key, snapshot.status);
   if (!priorStatus || priorStatus === snapshot.status) return;
 
-  const details = `${snapshot.serviceName} changed from ${priorStatus} to ${snapshot.status}. ${snapshot.message}`;
+  const support = supportSummary(snapshot);
+  const details = `${snapshot.serviceName} changed from ${priorStatus} to ${snapshot.status}. ${snapshot.message}${support ? ` ${support}` : ""}`;
   await writeAuditLog({ action: "service_health_status_change", details }, connection);
   if (snapshot.status === "offline") {
     await notifyAdmins({
       title: `${snapshot.serviceName} Offline`,
-      body: `${snapshot.serviceName} is unreachable. ${snapshot.message}`,
+      body: `${snapshot.serviceName} is unreachable. ${snapshot.message}${support ? ` ${support}` : ""}`,
       category: "serviceOutage"
     }, connection);
   }
 }
 
 async function saveSnapshot(connection: any, snapshot: ServiceHealthSnapshot) {
+  if (snapshot.status === "disabled") return;
   await ensureServiceHealthHistoryTable(connection);
   await connection.execute(
     `INSERT INTO service_health_history (
       service_key, service_name, checked_at, status, response_time_ms,
       latency_ms, packet_loss_percent, dns_status, dns_response_time_ms,
-      availability_percent, error_message
+      availability_percent, error_message, support_team, contact_number,
+      support_email, escalation_note
     ) VALUES (
       :serviceKey, :serviceName, SYSTIMESTAMP, :status, :responseTimeMs,
       :latencyMs, :packetLossPercent, :dnsStatus, :dnsResponseTimeMs,
-      :availabilityPercent, :errorMessage
+      :availabilityPercent, :errorMessage, :supportTeam, :contactNumber,
+      :supportEmail, :escalationNote
     )`,
     {
       serviceKey: snapshot.key,
@@ -179,7 +283,11 @@ async function saveSnapshot(connection: any, snapshot: ServiceHealthSnapshot) {
       dnsStatus: snapshot.dnsStatus,
       dnsResponseTimeMs: snapshot.dnsResponseTimeMs,
       availabilityPercent: snapshot.availabilityPercent,
-      errorMessage: snapshot.message || null
+      errorMessage: snapshot.message || null,
+      supportTeam: snapshot.supportTeam || null,
+      contactNumber: snapshot.contactNumber || null,
+      supportEmail: snapshot.supportEmail || null,
+      escalationNote: snapshot.escalationNote || null
     }
   );
   await recordOfflineTransition(connection, snapshot);
@@ -272,6 +380,13 @@ async function checkNetworkHealth(settings: SystemSettings): Promise<ServiceHeal
     availabilityPercent: availabilityFor(status),
     incidentCount: 0,
     message,
+    url: "internal://network-health",
+    monitoringEnabled: true,
+    isDefault: true,
+    supportTeam: "Network Team",
+    contactNumber: "",
+    supportEmail: "",
+    escalationNote: "Contact Network Team if network health is degraded or critical.",
     internetStatus,
     overallNetworkHealth: status === "healthy" ? "Healthy" : status === "slow" ? "Degraded" : "Critical"
   };
@@ -280,10 +395,12 @@ async function checkNetworkHealth(settings: SystemSettings): Promise<ServiceHeal
 async function checkService(service: ServiceDefinition, network: ServiceHealthSnapshot, settings: SystemSettings): Promise<ServiceHealthSnapshot> {
   const checkedAt = new Date().toISOString();
   let responseTimeMs: number | null = null;
-  let status: ServiceStatus = "offline";
-  let message = service.key === "bhel-webmail" ? "Connection Failed" : "Connection Timeout";
+  let status: ServiceStatus = service.monitoringEnabled ? "offline" : "disabled";
+  let message = service.monitoringEnabled ? (service.key === "bhel-webmail" ? "Connection Failed" : "Connection Timeout") : "Monitoring Disabled";
 
-  if (network.status === "offline") {
+  if (!service.monitoringEnabled) {
+    responseTimeMs = null;
+  } else if (network.status === "offline") {
     status = "unknown";
     message = "Cannot verify - network unavailable";
   } else if (!service.url) {
@@ -330,7 +447,14 @@ async function checkService(service: ServiceDefinition, network: ServiceHealthSn
     availability: `${availabilityFor(status)}%`,
     availabilityPercent: availabilityFor(status),
     incidentCount: 0,
-    message
+    message,
+    url: service.url,
+    monitoringEnabled: service.monitoringEnabled,
+    isDefault: service.isDefault,
+    supportTeam: service.supportTeam,
+    contactNumber: service.contactNumber,
+    supportEmail: service.supportEmail,
+    escalationNote: service.escalationNote
   };
 }
 
@@ -347,7 +471,11 @@ function mapHistoryRow(row: Record<string, any>): ServiceHealthHistoryPoint {
     dnsStatus: row.DNS_STATUS || null,
     dnsResponseTimeMs: row.DNS_RESPONSE_TIME_MS === null || row.DNS_RESPONSE_TIME_MS === undefined ? null : Number(row.DNS_RESPONSE_TIME_MS),
     availabilityPercent: row.AVAILABILITY_PERCENT === null || row.AVAILABILITY_PERCENT === undefined ? 0 : Number(row.AVAILABILITY_PERCENT),
-    errorMessage: row.ERROR_MESSAGE || null
+    errorMessage: row.ERROR_MESSAGE || null,
+    supportTeam: row.SUPPORT_TEAM || "",
+    contactNumber: row.CONTACT_NUMBER || "",
+    supportEmail: row.SUPPORT_EMAIL || "",
+    escalationNote: row.ESCALATION_NOTE || ""
   };
 }
 
@@ -356,8 +484,18 @@ export async function getCurrentServiceHealth() {
   try {
     const settings = await getSystemSettings();
     await ensureServiceHealthHistoryTable(connection);
-    const network = await checkNetworkHealth(settings);
-    const serviceSnapshots = await Promise.all(servicesFromSettings(settings).map((service) => checkService(service, network, settings)));
+    const defaultSupport = await getDefaultInfrastructureServicesWithSupport(connection);
+    const networkSupport = defaultSupport.find((service) => service.id === "network-health");
+    const network = { ...(await checkNetworkHealth(settings)), ...(networkSupport ? {
+      supportTeam: networkSupport.supportTeam,
+      contactNumber: networkSupport.contactNumber,
+      supportEmail: networkSupport.supportEmail,
+      escalationNote: networkSupport.escalationNote
+    } : {}) };
+    const defaultDefinitions = defaultSupport
+      .filter((service) => service.id !== "network-health")
+      .map((service) => defaultServiceDefinition(service, settings));
+    const serviceSnapshots = await Promise.all(defaultDefinitions.map((service) => checkService(service, network, settings)));
     const snapshots = [...serviceSnapshots, network];
 
     for (const snapshot of snapshots) {
@@ -388,12 +526,13 @@ export async function getServiceHealthHistory(range: RangeKey = "24h") {
     const result = await connection.execute(
       `SELECT id, service_key, service_name, checked_at, status, response_time_ms,
               latency_ms, packet_loss_percent, dns_status, dns_response_time_ms,
-              availability_percent, error_message
+              availability_percent, error_message, support_team, contact_number,
+              support_email, escalation_note
        FROM service_health_history
        WHERE checked_at >= SYSTIMESTAMP - INTERVAL '${rangeToInterval(range)}' DAY
        ORDER BY checked_at ASC`
     );
-    return { data: ((result.rows || []) as Array<Record<string, any>>).map(mapHistoryRow) };
+    return { data: ((result.rows || []) as Array<Record<string, any>>).filter((row) => defaultServiceOrder.includes(row.SERVICE_KEY)).map(mapHistoryRow) };
   } finally {
     await connection.close();
   }
@@ -404,11 +543,72 @@ export async function getServiceHealth() {
 }
 
 export async function getInfrastructureCurrent() {
-  return getCurrentServiceHealth();
+  const connection = await getConnection();
+  try {
+    const settings = await getSystemSettings();
+    await ensureServiceHealthHistoryTable(connection);
+    const defaultSupport = await getDefaultInfrastructureServicesWithSupport(connection);
+    const networkSupport = defaultSupport.find((service) => service.id === "network-health");
+    const network = { ...(await checkNetworkHealth(settings)), ...(networkSupport ? {
+      supportTeam: networkSupport.supportTeam,
+      contactNumber: networkSupport.contactNumber,
+      supportEmail: networkSupport.supportEmail,
+      escalationNote: networkSupport.escalationNote
+    } : {}) };
+    const customDefinitions = (await getCustomInfrastructureServices(connection)).map(customServiceDefinition);
+    const defaultDefinitions = defaultSupport
+      .filter((service) => service.id !== "network-health")
+      .map((service) => defaultServiceDefinition(service, settings));
+    const serviceDefinitions = [...defaultDefinitions, ...customDefinitions];
+    const serviceSnapshots = await Promise.all(serviceDefinitions.map((service) => checkService(service, network, settings)));
+    const snapshots = [...serviceSnapshots.slice(0, 2), network, ...serviceSnapshots.slice(2)];
+
+    for (const snapshot of snapshots) {
+      await saveSnapshot(connection, snapshot);
+    }
+    await connection.commit();
+
+    for (const snapshot of snapshots) {
+      if (snapshot.status === "disabled") continue;
+      const stats = await getHistoryStats(connection, snapshot.key, "24h");
+      snapshot.incidentCount = stats.incidentCount;
+      snapshot.availabilityPercent = stats.availabilityPercent;
+      snapshot.availability = `${stats.availabilityPercent}%`;
+    }
+
+    return { data: snapshots };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    await connection.close();
+  }
 }
 
 export async function getInfrastructureHistory(inputRange: unknown = "24h") {
-  return getServiceHealthHistory(normalizeRange(inputRange));
+  const range = normalizeRange(inputRange);
+  const connection = await getConnection();
+  try {
+    await ensureServiceHealthHistoryTable(connection);
+    const serviceKeys = await getActiveInfrastructureServiceKeys(connection);
+    const result = await connection.execute(
+      `SELECT id, service_key, service_name, checked_at, status, response_time_ms,
+              latency_ms, packet_loss_percent, dns_status, dns_response_time_ms,
+              availability_percent, error_message, support_team, contact_number,
+              support_email, escalation_note
+       FROM service_health_history
+       WHERE checked_at >= SYSTIMESTAMP - INTERVAL '${rangeToInterval(range)}' DAY
+       ORDER BY checked_at ASC`
+    );
+    return { data: ((result.rows || []) as Array<Record<string, any>>).filter((row) => serviceKeys.has(row.SERVICE_KEY)).map(mapHistoryRow) };
+  } finally {
+    await connection.close();
+  }
+}
+
+async function getActiveInfrastructureServiceKeys(connection: any) {
+  const customKeys = (await getCustomInfrastructureServices(connection)).map((service) => `custom-${service.id}`);
+  return new Set([...defaultServiceOrder, ...customKeys]);
 }
 
 export async function getInfrastructureHeatmap(inputRange: unknown = "24h") {
@@ -416,6 +616,7 @@ export async function getInfrastructureHeatmap(inputRange: unknown = "24h") {
   const connection = await getConnection();
   try {
     await ensureServiceHealthHistoryTable(connection);
+    const serviceKeys = await getActiveInfrastructureServiceKeys(connection);
     const result = await connection.execute(
       `SELECT service_key, service_name, checked_at, status
        FROM service_health_history
@@ -434,6 +635,7 @@ export async function getInfrastructureHeatmap(inputRange: unknown = "24h") {
     }>();
 
     for (const row of (result.rows || []) as Array<Record<string, any>>) {
+      if (!serviceKeys.has(row.SERVICE_KEY)) continue;
       const serviceKey = row.SERVICE_KEY as ServiceKey;
       const bucket = bucketFor(row.CHECKED_AT, range);
       const key = `${serviceKey}:${bucket}`;
@@ -482,10 +684,12 @@ export async function getInfrastructureIncidents(inputRange: unknown = "30d") {
   const connection = await getConnection();
   try {
     await ensureServiceHealthHistoryTable(connection);
+    const serviceKeys = await getActiveInfrastructureServiceKeys(connection);
     const result = await connection.execute(
       `SELECT id, service_key, service_name, checked_at, status, response_time_ms,
               latency_ms, packet_loss_percent, dns_status, dns_response_time_ms,
-              availability_percent, error_message,
+              availability_percent, error_message, support_team, contact_number,
+              support_email, escalation_note,
               LAG(status) OVER (PARTITION BY service_key ORDER BY checked_at) AS previous_status
        FROM service_health_history
        WHERE checked_at >= SYSTIMESTAMP - INTERVAL '${rangeToInterval(range)}' DAY
@@ -493,6 +697,7 @@ export async function getInfrastructureIncidents(inputRange: unknown = "30d") {
     );
 
     const data = ((result.rows || []) as Array<Record<string, any>>)
+      .filter((row) => serviceKeys.has(row.SERVICE_KEY))
       .filter((row) => {
         const status = String(row.STATUS || "");
         const previous = row.PREVIOUS_STATUS ? String(row.PREVIOUS_STATUS) : "";
@@ -522,7 +727,11 @@ export async function getInfrastructureIncidents(inputRange: unknown = "30d") {
           message: row.ERROR_MESSAGE || type,
           responseTimeMs: row.RESPONSE_TIME_MS === null || row.RESPONSE_TIME_MS === undefined ? null : Number(row.RESPONSE_TIME_MS),
           latencyMs: row.LATENCY_MS === null || row.LATENCY_MS === undefined ? null : Number(row.LATENCY_MS),
-          packetLossPercent: row.PACKET_LOSS_PERCENT === null || row.PACKET_LOSS_PERCENT === undefined ? null : Number(row.PACKET_LOSS_PERCENT)
+          packetLossPercent: row.PACKET_LOSS_PERCENT === null || row.PACKET_LOSS_PERCENT === undefined ? null : Number(row.PACKET_LOSS_PERCENT),
+          supportTeam: row.SUPPORT_TEAM || "",
+          contactNumber: row.CONTACT_NUMBER || "",
+          supportEmail: row.SUPPORT_EMAIL || "",
+          escalationNote: row.ESCALATION_NOTE || ""
         };
       });
 
@@ -537,8 +746,11 @@ export async function getInfrastructureReports(inputRange: unknown = "30d") {
   const connection = await getConnection();
   try {
     await ensureServiceHealthHistoryTable(connection);
+    const serviceKeys = await getActiveInfrastructureServiceKeys(connection);
     const result = await connection.execute(
       `SELECT service_key, service_name,
+              MAX(support_team) AS support_team,
+              MAX(contact_number) AS contact_number,
               COUNT(*) AS total_checks,
               AVG(CASE WHEN status IN ('healthy', 'online') THEN 100 ELSE 0 END) AS availability_percent,
               AVG(NVL(response_time_ms, latency_ms)) AS average_response_time_ms,
@@ -550,7 +762,7 @@ export async function getInfrastructureReports(inputRange: unknown = "30d") {
        ORDER BY service_name`
     );
 
-    const data = ((result.rows || []) as Array<Record<string, any>>).map((row) => {
+    const data = ((result.rows || []) as Array<Record<string, any>>).filter((row) => serviceKeys.has(row.SERVICE_KEY)).map((row) => {
       const downtimeChecks = Number(row.DOWNTIME_CHECKS || 0);
       return {
         serviceKey: row.SERVICE_KEY,
@@ -559,7 +771,9 @@ export async function getInfrastructureReports(inputRange: unknown = "30d") {
         averageResponseTimeMs: row.AVERAGE_RESPONSE_TIME_MS === null || row.AVERAGE_RESPONSE_TIME_MS === undefined ? null : Math.round(Number(row.AVERAGE_RESPONSE_TIME_MS)),
         totalDowntimeMinutes: downtimeChecks,
         incidentCount: Number(row.INCIDENT_COUNT || 0),
-        totalChecks: Number(row.TOTAL_CHECKS || 0)
+        totalChecks: Number(row.TOTAL_CHECKS || 0),
+        supportTeam: row.SUPPORT_TEAM || "",
+        contactNumber: row.CONTACT_NUMBER || ""
       };
     });
 

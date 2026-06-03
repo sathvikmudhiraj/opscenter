@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, AlertTriangle, Globe2, Mail, Network } from "lucide-react";
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api } from "@/lib/api";
@@ -24,6 +24,10 @@ type ServiceHealth = {
   availabilityPercent: number;
   incidentCount: number;
   message: string;
+  supportTeam?: string;
+  contactNumber?: string;
+  supportEmail?: string;
+  escalationNote?: string;
   internetStatus?: string;
   overallNetworkHealth?: string;
 };
@@ -58,13 +62,17 @@ export function InfrastructureMonitoring() {
   const [refreshMs, setRefreshMs] = useState(60000);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const inFlightRef = useRef(false);
+  const initialLoadRef = useRef(false);
 
   async function load(selectedRange = range) {
+    if (inFlightRef.current) return;
     if (!getSessionToken()) {
       setError("");
       setLoading(false);
       return;
     }
+    inFlightRef.current = true;
     try {
       const [{ data: currentData }, { data: historyData }] = await Promise.all([
         api.get<{ data: ServiceHealth[] }>("/service-health/current"),
@@ -77,6 +85,7 @@ export function InfrastructureMonitoring() {
       setError(requestError instanceof Error ? requestError.message : "Infrastructure monitoring could not be loaded.");
     } finally {
       setLoading(false);
+      inFlightRef.current = false;
     }
   }
 
@@ -94,6 +103,7 @@ export function InfrastructureMonitoring() {
         if (active) setRefreshMs(Math.max(10000, seconds * 1000));
       })
       .catch(() => undefined);
+    initialLoadRef.current = true;
     guardedLoad();
     return () => {
       active = false;
@@ -107,6 +117,10 @@ export function InfrastructureMonitoring() {
 
   useEffect(() => {
     if (!getSessionToken()) return;
+    if (initialLoadRef.current) {
+      initialLoadRef.current = false;
+      return;
+    }
     setLoading(true);
     load(range);
   }, [range]);
@@ -199,6 +213,14 @@ function MonitoringPanel({ serviceKey, service, history, loading }: { serviceKey
         )}
       </div>
 
+      {isActionRequired(status) ? (
+        <ActionRequired service={service} serviceKey={key} />
+      ) : service?.supportTeam || defaultSupportFor(key).supportTeam ? (
+        <p className="mt-4 rounded-md border border-slate-800 bg-slate-950/70 px-3 py-2 text-xs font-semibold text-slate-400">
+          Support: {service?.supportTeam || defaultSupportFor(key).supportTeam}{service?.contactNumber ? ` | Ext: ${service.contactNumber}` : ""}
+        </p>
+      ) : null}
+
       <div className="mt-4 h-32">
         {chartData.length ? (
           <ResponsiveContainer width="100%" height="100%">
@@ -240,6 +262,40 @@ function Metric({ label, value }: { label: string; value: string }) {
       <p className="mt-1 truncate text-sm font-semibold text-slate-100">{value}</p>
     </div>
   );
+}
+
+function ActionRequired({ service, serviceKey }: { service?: Partial<ServiceHealth>; serviceKey: ServiceKey }) {
+  const fallback = defaultSupportFor(serviceKey);
+  const supportTeam = service?.supportTeam || fallback.supportTeam;
+  const contactNumber = service?.contactNumber || fallback.contactNumber;
+  const supportEmail = service?.supportEmail || "";
+  const escalationNote = service?.escalationNote || fallback.escalationNote;
+  const configured = Boolean(supportTeam || contactNumber || supportEmail || escalationNote);
+  return (
+    <div className="mt-4 rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-3 text-sm">
+      <p className="font-semibold text-amber-100">Action Required</p>
+      {configured ? (
+        <div className="mt-2 space-y-1 text-xs font-semibold text-amber-50/90">
+          <p>Contact: {supportTeam || "Support contact not configured"}</p>
+          <p>Phone/Ext: {contactNumber || "Support contact not configured"}</p>
+          {supportEmail ? <p>Email: {supportEmail}</p> : null}
+          {escalationNote ? <p>Note: {escalationNote}</p> : null}
+        </div>
+      ) : (
+        <p className="mt-2 text-xs font-semibold text-amber-100">Support contact not configured</p>
+      )}
+    </div>
+  );
+}
+
+function defaultSupportFor(key: ServiceKey) {
+  if (key === "hpep-intranet") return { supportTeam: "IT Network Team", contactNumber: "", escalationNote: "Contact IT Network Team if HPEP Intranet is slow, offline, or down." };
+  if (key === "bhel-webmail") return { supportTeam: "Mail/Admin Team", contactNumber: "", escalationNote: "Contact Mail/Admin Team if BHEL Webmail is slow, offline, or down." };
+  return { supportTeam: "Network Team", contactNumber: "", escalationNote: "Contact Network Team if network health is degraded or critical." };
+}
+
+function isActionRequired(status?: string) {
+  return status === "slow" || status === "offline" || status === "unknown";
 }
 
 function formatMs(value?: number | null) {
