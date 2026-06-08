@@ -21,6 +21,7 @@ type PasswordPolicy = {
   requireLowercase: boolean;
   requireNumbers: boolean;
   requireSpecialCharacters: boolean;
+  adminManualUnlockEnabled: boolean;
 };
 
 const fallbackPolicy: PasswordPolicy = {
@@ -28,7 +29,8 @@ const fallbackPolicy: PasswordPolicy = {
   requireUppercase: true,
   requireLowercase: true,
   requireNumbers: true,
-  requireSpecialCharacters: false
+  requireSpecialCharacters: false,
+  adminManualUnlockEnabled: true
 };
 
 export function PasswordResetRequests() {
@@ -82,6 +84,16 @@ export function PasswordResetRequests() {
     }
   }
 
+  async function unlockAccount(request: ResetRequest) {
+    setMessage("");
+    try {
+      await api.post("/users/unlock-account", { username: request.username });
+      setMessage(`${request.username} account cooldown cleared.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not unlock account.");
+    }
+  }
+
   return (
     <section className="space-y-4">
       {message ? <p className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 shadow-sm">{message}</p> : null}
@@ -114,6 +126,7 @@ export function PasswordResetRequests() {
                     <button disabled={request.status !== "PENDING"} onClick={() => setStatus(request, "APPROVED")} className="rounded-md border border-green-200 px-3 py-2 text-xs font-semibold text-green-700 hover:bg-green-50 disabled:opacity-50">Approve</button>
                     <button disabled={request.status !== "PENDING"} onClick={() => setStatus(request, "REJECTED")} className="rounded-md border border-red-200 px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50">Reject</button>
                     <button disabled={request.status === "REJECTED" || request.status === "COMPLETED"} onClick={() => openReset(request)} className="rounded-md bg-blue-700 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-800 disabled:opacity-50">Reset Password</button>
+                    {policy.adminManualUnlockEnabled ? <button onClick={() => unlockAccount(request)} className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800 hover:bg-amber-100">Unlock Account</button> : null}
                   </div>
                 </td>
               </tr>

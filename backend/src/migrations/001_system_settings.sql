@@ -35,3 +35,33 @@ EXCEPTION
     IF SQLCODE != -955 THEN RAISE; END IF;
 END;
 /
+
+MERGE INTO system_settings target
+USING (
+  SELECT 'security' AS setting_key,
+         '{
+           "minimumPasswordLength": 8,
+           "requireUppercase": true,
+           "requireLowercase": true,
+           "requireNumbers": true,
+           "requireSpecialCharacters": false,
+           "passwordExpiryDays": 90,
+           "sessionTimeoutMinutes": 480,
+           "failedLoginLimit": 5,
+           "cooldownEnabled": true,
+           "cooldownDurationMinutes": 1,
+           "escalatingCooldownEnabled": true,
+           "maximumCooldownMinutes": 5,
+           "adminManualUnlockEnabled": true,
+           "accountLockoutDurationMinutes": 1,
+           "mfaEnabled": false,
+           "auditLoggingEnabled": true
+         }' AS setting_value
+  FROM dual
+) source
+ON (target.setting_key = source.setting_key)
+WHEN NOT MATCHED THEN
+  INSERT (setting_key, setting_value, updated_by)
+  VALUES (source.setting_key, source.setting_value, NULL);
+
+COMMIT;

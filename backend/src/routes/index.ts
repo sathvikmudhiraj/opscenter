@@ -1,6 +1,8 @@
 import { Router } from "express";
 import { assetsRouter } from "./assets.routes";
 import { authRouter } from "./auth.routes";
+import { clientAgentRouter } from "./clientAgent.routes";
+import { clientConnectivityRouter } from "./clientConnectivity.routes";
 import { infrastructureRouter } from "./infrastructure.routes";
 import { infrastructureServicesRouter } from "./infrastructureServices.routes";
 import { notificationsRouter } from "./notifications.routes";
@@ -14,11 +16,18 @@ import { usersRouter } from "./users.routes";
 
 export const apiRouter = Router();
 
+apiRouter.get("/", (_req, res) => res.json({
+  status: "ok",
+  service: "opscenter-api",
+  health: "/api/health"
+}));
 apiRouter.get("/health", (_req, res) => res.json({ status: "ok", service: "opscenter-api" }));
 apiRouter.use("/auth", authRouter);
 apiRouter.use("/tickets", ticketsRouter);
 apiRouter.use("/users", usersRouter);
 apiRouter.use("/assets", assetsRouter);
+apiRouter.use("/client-agent", clientAgentRouter);
+apiRouter.use("/client-connectivity", clientConnectivityRouter);
 apiRouter.use("/infrastructure", infrastructureRouter);
 apiRouter.use("/infrastructure-services", infrastructureServicesRouter);
 apiRouter.use("/notifications", notificationsRouter);

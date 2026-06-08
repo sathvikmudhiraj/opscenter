@@ -12,7 +12,7 @@ function rangeFromQuery(value: unknown) {
 }
 
 export const getCurrentInfrastructure = asyncHandler(async (_req, res) => {
-  res.json(await getInfrastructureCurrent());
+  res.json(await getInfrastructureCurrent({ persist: false }));
 });
 
 export const getInfrastructureHistory = asyncHandler(async (req, res) => {

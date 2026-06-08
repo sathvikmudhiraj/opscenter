@@ -20,11 +20,50 @@ type UserRow = {
 };
 
 type OracleUserRow = Record<string, unknown>;
-const failedLogins = new Map<string, { count: number; lockedUntil: number }>();
+type FailedLoginState = {
+  count: number;
+  lockedUntil: number;
+  cooldownLevel: number;
+};
 
-function signToken(user: Pick<UserRow, "id" | "name" | "username" | "email" | "role">, sessionTimeoutMinutes?: number) {
+const failedLogins = new Map<string, FailedLoginState>();
+
+function logDevelopmentAuth(message: string) {
+  if (env.nodeEnv !== "production") {
+    console.info(`[auth] ${message}`);
+  }
+}
+
+function normalizeLoginKey(username: string) {
+  return username.trim().toLowerCase();
+}
+
+function cooldownDetails(state: FailedLoginState) {
+  const remainingSeconds = Math.max(1, Math.ceil((state.lockedUntil - Date.now()) / 1000));
+  const message = `Too many failed attempts. Try again in ${remainingSeconds} seconds.`;
+  return {
+    success: false,
+    message,
+    remainingSeconds,
+    lockedUntil: new Date(state.lockedUntil).toISOString(),
+    failedAttempts: state.count
+  };
+}
+
+export function unlockLogin(username: string) {
+  const loginKey = normalizeLoginKey(username);
+  const previous = failedLogins.get(loginKey);
+  failedLogins.delete(loginKey);
+  return {
+    username: loginKey,
+    unlocked: Boolean(previous),
+    failedAttempts: previous?.count || 0
+  };
+}
+
+function signToken(user: Pick<UserRow, "id" | "name" | "username" | "email" | "role">, sessionTimeoutMinutes: number) {
   const options: SignOptions = {
-    expiresIn: sessionTimeoutMinutes ? `${sessionTimeoutMinutes}m` as SignOptions["expiresIn"] : env.jwtExpiresIn as SignOptions["expiresIn"]
+    expiresIn: `${sessionTimeoutMinutes}m` as SignOptions["expiresIn"]
   };
   return jwt.sign({ sub: user.id, username: user.username, email: user.email || user.username, fullName: user.name, role: user.role }, env.jwtSecret, options);
 }
@@ -120,7 +159,7 @@ export async function setupAdmin(input: { name: string; email: string; password:
     await writeAuditLog({ userId: id, action: "user_created", details: `${input.email.toLowerCase()} created as first admin.` }, connection);
     await connection.commit();
     const user = { id, name: input.name, username: input.email.toLowerCase(), email: input.email.toLowerCase(), role: "admin" as const };
-    const settings = await getSystemSettings();
+    const settings = await getSystemSettings({ force: true });
     return { token: signToken(user, settings.security.sessionTimeoutMinutes), user };
   } catch (error) {
     await connection.rollback();
@@ -133,11 +172,28 @@ export async function setupAdmin(input: { name: string; email: string; password:
 export async function login(input: { email: string; password: string }) {
   const connection = await getConnection();
   try {
-    const settings = await getSystemSettings();
-    const loginKey = input.email.toLowerCase();
-    const attempt = failedLogins.get(loginKey);
-    if (attempt && attempt.lockedUntil > Date.now()) {
-      throw new HttpError(423, "Account temporarily locked. Try again later.");
+    const loginKey = normalizeLoginKey(input.email);
+    const settings = await getSystemSettings({ force: true });
+    const cooldownPolicy = settings.security;
+    const cooldownEnabled = env.nodeEnv === "production" && cooldownPolicy.cooldownEnabled;
+    let attempt = cooldownEnabled ? failedLogins.get(loginKey) : undefined;
+    if (cooldownEnabled && attempt?.lockedUntil) {
+      if (attempt.lockedUntil > Date.now()) {
+        const details = cooldownDetails(attempt);
+        throw new HttpError(429, details.message, details);
+      }
+      attempt = { ...attempt, count: 0, lockedUntil: 0 };
+      failedLogins.set(loginKey, attempt);
+    } else if (!cooldownEnabled) {
+      failedLogins.delete(loginKey);
+    }
+    if (env.nodeEnv !== "production") {
+      const schemaResult = await connection.execute(
+        "SELECT USER AS connected_user, SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') AS current_schema FROM dual"
+      );
+      const schema = ((schemaResult.rows || []) as Array<{ CONNECTED_USER: string; CURRENT_SCHEMA: string }>)[0];
+      logDevelopmentAuth(`Connected Oracle user/schema: ${schema?.CONNECTED_USER || env.oracle.user}/${schema?.CURRENT_SCHEMA || "unknown"}`);
+      logDevelopmentAuth(`Searched username: ${loginKey}`);
     }
     const authColumns = await getUserAuthColumns(connection);
     const usernameColumn = authColumns.usernameColumn;
@@ -161,35 +217,62 @@ export async function login(input: { email: string; password: string }) {
     );
     const row = ((result.rows || []) as OracleUserRow[])[0];
     if (!row) {
-      console.info(`[auth] Login user not found: ${input.email}`);
-      throw new HttpError(401, "Invalid credentials");
+      logDevelopmentAuth("User found: false");
+      throw new HttpError(401, "User not found");
     }
 
     const user = normalizeUser(row);
-    console.info(`[auth] Login user found: ${user.username}`);
+    logDevelopmentAuth("User found: true");
+    logDevelopmentAuth(`Status: ${user.status}`);
+    logDevelopmentAuth(`Role: ${user.role}`);
 
     if (user.status !== "active") {
-      console.info(`[auth] Login rejected for ${user.username}: account status ${user.status}`);
-      throw new HttpError(401, "Invalid credentials");
+      throw new HttpError(403, "Account disabled");
     }
 
     const storedPassword = user.passwordHash.trim();
     const bcryptValid = await bcrypt.compare(input.password, storedPassword).catch(() => false);
-    // TODO: Replace plain-text testing fallback with bcrypt-only before production.
-    const plainTextTestValid = input.password === storedPassword;
+    const plainTextTestValid = env.nodeEnv !== "production" && input.password === storedPassword;
     const valid = bcryptValid || plainTextTestValid;
-    console.info(`[auth] Password ${valid ? "valid" : "invalid"} for ${user.username}`);
+    logDevelopmentAuth(`bcryptValid: ${bcryptValid}`);
+    logDevelopmentAuth(`plainTextTestValid: ${plainTextTestValid}`);
     if (!valid) {
-      const nextCount = (failedLogins.get(loginKey)?.count || 0) + 1;
-      const lockedUntil = nextCount >= settings.security.failedLoginLimit
-        ? Date.now() + settings.security.accountLockoutDurationMinutes * 60 * 1000
-        : 0;
-      failedLogins.set(loginKey, { count: nextCount, lockedUntil });
-      await writeAuditLog({ userId: user.id, action: "login_failed", details: `Failed login ${nextCount}/${settings.security.failedLoginLimit} for ${user.username}.` }, connection);
-      throw new HttpError(401, "Invalid credentials");
+      if (cooldownEnabled) {
+        const current = failedLogins.get(loginKey) || { count: 0, lockedUntil: 0, cooldownLevel: 0 };
+        const nextCount = current.count + 1;
+        const failedLoginLimit = cooldownPolicy.failedLoginLimit;
+        const fixedCooldownMinutes = cooldownPolicy.cooldownDurationMinutes;
+        const maximumCooldownMinutes = Math.max(fixedCooldownMinutes, cooldownPolicy.maximumCooldownMinutes);
+        const cooldownLevel = nextCount >= failedLoginLimit
+          ? cooldownPolicy.escalatingCooldownEnabled
+            ? Math.min(Math.max(current.cooldownLevel + 1, fixedCooldownMinutes), maximumCooldownMinutes)
+            : fixedCooldownMinutes
+          : current.cooldownLevel;
+        const nextState: FailedLoginState = {
+          count: nextCount,
+          cooldownLevel,
+          lockedUntil: nextCount >= failedLoginLimit ? Date.now() + cooldownLevel * 60 * 1000 : 0
+        };
+        failedLogins.set(loginKey, nextState);
+        await writeAuditLog({ userId: user.id, action: "login_failed", details: `Failed login ${nextCount}/${failedLoginLimit} for ${user.username}.` }, connection);
+        if (nextState.lockedUntil) {
+          const details = cooldownDetails(nextState);
+          throw new HttpError(429, details.message, details);
+        }
+        throw new HttpError(401, "Invalid credentials", {
+          success: false,
+          remainingSeconds: 0,
+          lockedUntil: null,
+          failedAttempts: nextState.count
+        });
+      }
+      throw new HttpError(401, "Invalid credentials", {
+        remainingSeconds: 0,
+        lockedUntil: null,
+        failedAttempts: 0
+      });
     }
 
-    console.info(`[auth] Role detected for ${user.username}: ${user.role}`);
     failedLogins.delete(loginKey);
     return {
       token: signToken(user, settings.security.sessionTimeoutMinutes),

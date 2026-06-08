@@ -59,18 +59,21 @@ async function notificationAllowed(category: NotificationCategory = "system") {
   return true;
 }
 
-export async function getUnreadNotificationCount() {
+export async function getUnreadNotificationCount(input?: { userId: number }) {
   if (!(await notificationAllowed())) return 0;
   const connection = await getConnection();
   try {
     const columns = await getNotificationColumns(connection);
     if (!columns.hasTable) return 0;
+    const userFilter = input ? "user_id = :userId AND " : "";
+    const binds = input ? { userId: input.userId } : {};
     if (columns.hasIsRead) {
       const result = await connection.execute(
         `SELECT COUNT(*)
          AS unread_count
          FROM NOTIFICATIONS
-         WHERE UPPER(TRIM(TO_CHAR(IS_READ))) IN ('N', '0', 'FALSE')`
+         WHERE ${userFilter}UPPER(TRIM(TO_CHAR(IS_READ))) IN ('N', '0', 'FALSE')`,
+        binds
       );
       return Number(((result.rows || [])[0] as { UNREAD_COUNT?: number })?.UNREAD_COUNT || 0);
     }
@@ -78,7 +81,8 @@ export async function getUnreadNotificationCount() {
       const result = await connection.execute(
         `SELECT COUNT(*) AS unread_count
          FROM notifications
-         WHERE read_at IS NULL`
+         WHERE ${userFilter}read_at IS NULL`,
+        binds
       );
       return Number(((result.rows || [])[0] as { UNREAD_COUNT?: number })?.UNREAD_COUNT || 0);
     }

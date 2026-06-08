@@ -1,4 +1,4 @@
-import { TicketDetailView } from "@/components/tickets/TicketDetailView";
+import { TicketDetailRoute } from "@/components/tickets/TicketDetailRoute";
 
 type TicketDetailPageProps = {
   params: Promise<{ id: string }>;
@@ -9,11 +9,5 @@ export default async function TicketDetailPage({
 }: TicketDetailPageProps) {
   const { id } = await params;
 
-  return (
-    <main className="min-h-screen bg-[#eef3f8] px-5 py-6 lg:px-8">
-      <div className="mx-auto max-w-6xl">
-        <TicketDetailView id={id} />
-      </div>
-    </main>
-  );
+  return <TicketDetailRoute id={id} />;
 }

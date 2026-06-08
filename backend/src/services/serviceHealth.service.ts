@@ -8,6 +8,7 @@ import { getCustomInfrastructureServices, getDefaultInfrastructureServicesWithSu
 type ServiceKey = string;
 type ServiceStatus = "healthy" | "online" | "slow" | "offline" | "unknown" | "disabled";
 type RangeKey = "24h" | "7d" | "30d";
+type HeatmapStatus = "healthy" | "degraded" | "critical" | "no_data" | "cannot_verify";
 
 type ServiceDefinition = {
   key: ServiceKey;
@@ -104,6 +105,7 @@ function servicesFromSettings(settings: SystemSettings): ServiceDefinition[] {
 }
 
 function customServiceDefinition(service: InfrastructureService): ServiceDefinition {
+  const support = knownSupportForService(service.name);
   return {
     key: `custom-${service.id}`,
     name: service.name,
@@ -111,11 +113,23 @@ function customServiceDefinition(service: InfrastructureService): ServiceDefinit
     onlineLabel: "Online",
     monitoringEnabled: service.monitoringEnabled,
     isDefault: false,
-    supportTeam: service.supportTeam,
-    contactNumber: service.contactNumber,
+    supportTeam: support?.supportTeam || service.supportTeam,
+    contactNumber: support?.contactNumber || service.contactNumber,
     supportEmail: service.supportEmail,
-    escalationNote: service.escalationNote
+    escalationNote: support?.escalationNote || service.escalationNote
   };
+}
+
+function knownSupportForService(serviceName: string) {
+  const normalizedName = serviceName.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (normalizedName.includes("dynacon")) {
+    return {
+      supportTeam: "Dynacon Support Team",
+      contactNumber: "2447",
+      escalationNote: "Contact Dynacon team if service is slow/offline/down."
+    };
+  }
+  return null;
 }
 
 function defaultServiceDefinition(service: InfrastructureService, settings: SystemSettings): ServiceDefinition {
@@ -156,9 +170,83 @@ function bucketFor(value: unknown, range: RangeKey) {
   const day = String(date.getDate()).padStart(2, "0");
   if (range === "24h") {
     const hour = String(date.getHours()).padStart(2, "0");
+    const minute = Math.floor(date.getMinutes() / 5) * 5;
+    return `${year}-${month}-${day} ${hour}:${padDatePart(minute)}`;
+  }
+  if (range === "7d") {
+    const hour = String(date.getHours()).padStart(2, "0");
     return `${year}-${month}-${day} ${hour}:00`;
   }
+  if (range === "30d") {
+    const hour = Math.floor(date.getHours() / 6) * 6;
+    return `${year}-${month}-${day} ${padDatePart(hour)}:00`;
+  }
   return `${year}-${month}-${day}`;
+}
+
+function padDatePart(value: number) {
+  return String(value).padStart(2, "0");
+}
+
+function bucketLabel(date: Date, range: RangeKey) {
+  const year = date.getFullYear();
+  const month = padDatePart(date.getMonth() + 1);
+  const day = padDatePart(date.getDate());
+  if (range === "24h") return `${year}-${month}-${day} ${padDatePart(date.getHours())}:${padDatePart(date.getMinutes())}`;
+  if (range === "7d") return `${year}-${month}-${day} ${padDatePart(date.getHours())}:00`;
+  if (range === "30d") return `${year}-${month}-${day} ${padDatePart(date.getHours())}:00`;
+  return `${year}-${month}-${day}`;
+}
+
+function buildRangeBuckets(range: RangeKey) {
+  const count = range === "24h" ? 288 : range === "7d" ? 168 : 120;
+  const now = new Date();
+  const anchor = new Date(now);
+  if (range === "24h") {
+    anchor.setMinutes(Math.floor(anchor.getMinutes() / 5) * 5, 0, 0);
+  } else if (range === "7d") {
+    anchor.setMinutes(0, 0, 0);
+  } else {
+    anchor.setHours(Math.floor(anchor.getHours() / 6) * 6, 0, 0, 0);
+  }
+  return Array.from({ length: count }, (_, index) => {
+    const date = new Date(anchor);
+    if (range === "24h") date.setMinutes(anchor.getMinutes() - (count - 1 - index) * 5);
+    else if (range === "7d") date.setHours(anchor.getHours() - (count - 1 - index));
+    else date.setHours(anchor.getHours() - (count - 1 - index) * 6);
+    return bucketLabel(date, range);
+  });
+}
+
+function heatmapBucketFor(value: unknown, range: RangeKey) {
+  const date = value instanceof Date ? value : new Date(String(value));
+  if (Number.isNaN(date.getTime())) return "unknown";
+  const year = date.getFullYear();
+  const month = padDatePart(date.getMonth() + 1);
+  const day = padDatePart(date.getDate());
+  const hour = padDatePart(date.getHours());
+  if (range === "24h") return `${year}-${month}-${day} ${hour}:00`;
+  return `${year}-${month}-${day}`;
+}
+
+function buildHeatmapRangeBuckets(range: RangeKey) {
+  const count = range === "24h" ? 24 : range === "7d" ? 7 : 30;
+  const anchor = new Date();
+  if (range === "24h") anchor.setMinutes(0, 0, 0);
+  else anchor.setHours(0, 0, 0, 0);
+  return Array.from({ length: count }, (_, index) => {
+    const start = new Date(anchor);
+    if (range === "24h") start.setHours(anchor.getHours() - (count - 1 - index));
+    else start.setDate(anchor.getDate() - (count - 1 - index));
+    const end = new Date(start);
+    if (range === "24h") end.setHours(start.getHours() + 1);
+    else end.setDate(start.getDate() + 1);
+    return {
+      label: range === "24h" ? bucketLabel(start, "7d") : bucketLabel(start, range),
+      start: start.toISOString(),
+      end: end.toISOString()
+    };
+  });
 }
 
 function statusLabelFor(service: ServiceDefinition, status: ServiceStatus) {
@@ -173,7 +261,6 @@ function availabilityFor(status: ServiceStatus) {
   if (status === "disabled") return 0;
   if (status === "offline") return 0;
   if (status === "unknown") return 0;
-  if (status === "slow") return 95;
   return 100;
 }
 
@@ -299,7 +386,7 @@ async function getHistoryStats(connection: any, serviceKey: ServiceKey, range: R
     `SELECT
        COUNT(*) AS total,
        SUM(CASE WHEN status IN ('offline', 'slow', 'unknown') THEN 1 ELSE 0 END) AS incidents,
-       AVG(CASE WHEN status IN ('healthy', 'online') THEN 100 ELSE 0 END) AS availability
+       AVG(CASE WHEN status IN ('healthy', 'online', 'slow') THEN 100 ELSE 0 END) AS availability
      FROM service_health_history
      WHERE service_key = :serviceKey
        AND checked_at >= SYSTIMESTAMP - INTERVAL '${rangeToInterval(range)}' DAY`,
@@ -479,6 +566,66 @@ function mapHistoryRow(row: Record<string, any>): ServiceHealthHistoryPoint {
   };
 }
 
+function statusSeverity(status: string) {
+  if (status === "offline" || status === "unknown") return 3;
+  if (status === "slow") return 2;
+  if (status === "healthy" || status === "online") return 1;
+  return 0;
+}
+
+function downsampleHistoryRows(rows: Array<Record<string, any>>, range: RangeKey) {
+  const buckets = new Map<string, {
+    latest: Record<string, any>;
+    status: string;
+    totalChecks: number;
+    availableChecks: number;
+    responseTimeTotal: number;
+    responseTimeCount: number;
+    latencyTotal: number;
+    latencyCount: number;
+  }>();
+
+  for (const row of rows) {
+    const bucket = bucketFor(row.CHECKED_AT, range);
+    const key = `${row.SERVICE_KEY}:${bucket}`;
+    const current = buckets.get(key) || {
+      latest: row,
+      status: String(row.STATUS || ""),
+      totalChecks: 0,
+      availableChecks: 0,
+      responseTimeTotal: 0,
+      responseTimeCount: 0,
+      latencyTotal: 0,
+      latencyCount: 0
+    };
+    const status = String(row.STATUS || "");
+    current.totalChecks += 1;
+    if (status === "healthy" || status === "online" || status === "slow") current.availableChecks += 1;
+    if (statusSeverity(status) > statusSeverity(current.status)) current.status = status;
+    if (new Date(row.CHECKED_AT).getTime() >= new Date(current.latest.CHECKED_AT).getTime()) current.latest = row;
+    if (row.RESPONSE_TIME_MS !== null && row.RESPONSE_TIME_MS !== undefined) {
+      current.responseTimeTotal += Number(row.RESPONSE_TIME_MS);
+      current.responseTimeCount += 1;
+    }
+    if (row.LATENCY_MS !== null && row.LATENCY_MS !== undefined) {
+      current.latencyTotal += Number(row.LATENCY_MS);
+      current.latencyCount += 1;
+    }
+    buckets.set(key, current);
+  }
+
+  return Array.from(buckets.values())
+    .map((bucket) => ({
+      ...bucket.latest,
+      CHECKED_AT: bucket.latest.CHECKED_AT,
+      STATUS: bucket.status,
+      RESPONSE_TIME_MS: bucket.responseTimeCount ? Math.round(bucket.responseTimeTotal / bucket.responseTimeCount) : null,
+      LATENCY_MS: bucket.latencyCount ? Math.round(bucket.latencyTotal / bucket.latencyCount) : null,
+      AVAILABILITY_PERCENT: bucket.totalChecks ? Math.round((bucket.availableChecks / bucket.totalChecks) * 10000) / 100 : 100
+    }))
+    .sort((left, right) => new Date(left.CHECKED_AT).getTime() - new Date(right.CHECKED_AT).getTime());
+}
+
 export async function getCurrentServiceHealth() {
   const connection = await getConnection();
   try {
@@ -532,7 +679,8 @@ export async function getServiceHealthHistory(range: RangeKey = "24h") {
        WHERE checked_at >= SYSTIMESTAMP - INTERVAL '${rangeToInterval(range)}' DAY
        ORDER BY checked_at ASC`
     );
-    return { data: ((result.rows || []) as Array<Record<string, any>>).filter((row) => defaultServiceOrder.includes(row.SERVICE_KEY)).map(mapHistoryRow) };
+    const rows = ((result.rows || []) as Array<Record<string, any>>).filter((row) => defaultServiceOrder.includes(row.SERVICE_KEY));
+    return { data: downsampleHistoryRows(rows, range).map(mapHistoryRow) };
   } finally {
     await connection.close();
   }
@@ -542,7 +690,8 @@ export async function getServiceHealth() {
   return getCurrentServiceHealth();
 }
 
-export async function getInfrastructureCurrent() {
+export async function getInfrastructureCurrent(options: { persist?: boolean } = {}) {
+  const persist = options.persist !== false;
   const connection = await getConnection();
   try {
     const settings = await getSystemSettings();
@@ -563,10 +712,12 @@ export async function getInfrastructureCurrent() {
     const serviceSnapshots = await Promise.all(serviceDefinitions.map((service) => checkService(service, network, settings)));
     const snapshots = [...serviceSnapshots.slice(0, 2), network, ...serviceSnapshots.slice(2)];
 
-    for (const snapshot of snapshots) {
-      await saveSnapshot(connection, snapshot);
+    if (persist) {
+      for (const snapshot of snapshots) {
+        await saveSnapshot(connection, snapshot);
+      }
+      await connection.commit();
     }
-    await connection.commit();
 
     for (const snapshot of snapshots) {
       if (snapshot.status === "disabled") continue;
@@ -600,7 +751,8 @@ export async function getInfrastructureHistory(inputRange: unknown = "24h") {
        WHERE checked_at >= SYSTIMESTAMP - INTERVAL '${rangeToInterval(range)}' DAY
        ORDER BY checked_at ASC`
     );
-    return { data: ((result.rows || []) as Array<Record<string, any>>).filter((row) => serviceKeys.has(row.SERVICE_KEY)).map(mapHistoryRow) };
+    const rows = ((result.rows || []) as Array<Record<string, any>>).filter((row) => serviceKeys.has(row.SERVICE_KEY));
+    return { data: downsampleHistoryRows(rows, range).map(mapHistoryRow) };
   } finally {
     await connection.close();
   }
@@ -611,14 +763,39 @@ async function getActiveInfrastructureServiceKeys(connection: any) {
   return new Set([...defaultServiceOrder, ...customKeys]);
 }
 
+async function getActiveInfrastructureServiceSummaries(connection: any) {
+  const defaultSupport = await getDefaultInfrastructureServicesWithSupport(connection);
+  const customServices = await getCustomInfrastructureServices(connection);
+  const byKey = new Map<ServiceKey, { serviceKey: ServiceKey; serviceName: string; monitoringEnabled: boolean }>();
+  for (const service of defaultSupport) {
+    byKey.set(service.id, {
+      serviceKey: service.id,
+      serviceName: service.name,
+      monitoringEnabled: service.monitoringEnabled
+    });
+  }
+  for (const service of customServices) {
+    byKey.set(`custom-${service.id}`, {
+      serviceKey: `custom-${service.id}`,
+      serviceName: service.name,
+      monitoringEnabled: service.monitoringEnabled
+    });
+  }
+  return [
+    ...defaultServiceOrder.map((key) => byKey.get(key)).filter((service): service is { serviceKey: ServiceKey; serviceName: string; monitoringEnabled: boolean } => Boolean(service)),
+    ...Array.from(byKey.values()).filter((service) => !defaultServiceOrder.includes(service.serviceKey))
+  ];
+}
+
 export async function getInfrastructureHeatmap(inputRange: unknown = "24h") {
   const range = normalizeRange(inputRange);
   const connection = await getConnection();
   try {
     await ensureServiceHealthHistoryTable(connection);
-    const serviceKeys = await getActiveInfrastructureServiceKeys(connection);
+    const services = await getActiveInfrastructureServiceSummaries(connection);
+    const serviceKeys = new Set(services.map((service) => service.serviceKey));
     const result = await connection.execute(
-      `SELECT service_key, service_name, checked_at, status
+      `SELECT service_key, service_name, checked_at, status, response_time_ms, latency_ms
        FROM service_health_history
        WHERE checked_at >= SYSTIMESTAMP - INTERVAL '${rangeToInterval(range)}' DAY
        ORDER BY service_key, checked_at`
@@ -632,12 +809,18 @@ export async function getInfrastructureHeatmap(inputRange: unknown = "24h") {
       healthyChecks: number;
       degradedChecks: number;
       criticalChecks: number;
+      cannotVerifyChecks: number;
+      availableChecks: number;
+      responseTimeTotal: number;
+      responseTimeCount: number;
+      maxResponseTimeMs: number | null;
+      latestCheckedAt: string | null;
     }>();
 
     for (const row of (result.rows || []) as Array<Record<string, any>>) {
       if (!serviceKeys.has(row.SERVICE_KEY)) continue;
       const serviceKey = row.SERVICE_KEY as ServiceKey;
-      const bucket = bucketFor(row.CHECKED_AT, range);
+      const bucket = heatmapBucketFor(row.CHECKED_AT, range);
       const key = `${serviceKey}:${bucket}`;
       const current = buckets.get(key) || {
         serviceKey,
@@ -646,37 +829,75 @@ export async function getInfrastructureHeatmap(inputRange: unknown = "24h") {
         totalChecks: 0,
         healthyChecks: 0,
         degradedChecks: 0,
-        criticalChecks: 0
+        criticalChecks: 0,
+        cannotVerifyChecks: 0,
+        availableChecks: 0,
+        responseTimeTotal: 0,
+        responseTimeCount: 0,
+        maxResponseTimeMs: null,
+        latestCheckedAt: null
       };
       const status = String(row.STATUS || "");
+      const responseTime = row.RESPONSE_TIME_MS;
       current.totalChecks += 1;
-      if (status === "healthy" || status === "online") current.healthyChecks += 1;
-      else if (status === "slow") current.degradedChecks += 1;
-      else if (status === "offline" || status === "unknown") current.criticalChecks += 1;
+      if (status === "healthy" || status === "online") {
+        current.healthyChecks += 1;
+        current.availableChecks += 1;
+      } else if (status === "slow") {
+        current.degradedChecks += 1;
+        current.availableChecks += 1;
+      } else if (status === "offline") {
+        current.criticalChecks += 1;
+      } else if (status === "unknown") {
+        current.cannotVerifyChecks += 1;
+      }
+      if (responseTime !== null && responseTime !== undefined) {
+        const responseTimeMs = Number(responseTime);
+        current.responseTimeTotal += responseTimeMs;
+        current.responseTimeCount += 1;
+        current.maxResponseTimeMs = current.maxResponseTimeMs === null ? responseTimeMs : Math.max(current.maxResponseTimeMs, responseTimeMs);
+      }
+      current.latestCheckedAt = row.CHECKED_AT;
       buckets.set(key, current);
     }
 
-    const data = Array.from(buckets.values()).map((row) => {
-      let status = "no_data";
-      if (row.criticalChecks > 0) status = "critical";
-      else if (row.degradedChecks > 0) status = "degraded";
-      else if (row.healthyChecks > 0) status = "healthy";
+    const rangeBuckets = buildHeatmapRangeBuckets(range);
+    const data = services.flatMap((service) => rangeBuckets.map((bucket) => {
+      const row = buckets.get(`${service.serviceKey}:${bucket.label}`);
+      let status: HeatmapStatus = "no_data";
+      if (row?.criticalChecks) status = "critical";
+      else if (row?.cannotVerifyChecks) status = "cannot_verify";
+      else if (row?.degradedChecks) status = "degraded";
+      else if (row?.healthyChecks) status = "healthy";
       return {
-        serviceKey: row.serviceKey,
-        serviceName: row.serviceName,
-        bucket: row.bucket,
-        totalChecks: row.totalChecks,
-        healthyChecks: row.healthyChecks,
-        degradedChecks: row.degradedChecks,
-        criticalChecks: row.criticalChecks,
-        status
+        serviceKey: service.serviceKey,
+        serviceName: row?.serviceName || service.serviceName,
+        bucket: bucket.label,
+        bucketStartAt: bucket.start,
+        bucketEndAt: bucket.end,
+        totalChecks: row?.totalChecks || 0,
+        healthyChecks: row?.healthyChecks || 0,
+        degradedChecks: row?.degradedChecks || 0,
+        criticalChecks: row?.criticalChecks || 0,
+        cannotVerifyChecks: row?.cannotVerifyChecks || 0,
+        availableChecks: row?.availableChecks || 0,
+        incidentCount: row ? row.criticalChecks + row.cannotVerifyChecks + row.degradedChecks : 0,
+        status,
+        checkedAt: row?.latestCheckedAt || null,
+        responseTimeMs: row?.responseTimeCount ? Math.round(row.responseTimeTotal / row.responseTimeCount) : null,
+        maxResponseTimeMs: row?.maxResponseTimeMs === null || row?.maxResponseTimeMs === undefined ? null : Math.round(row.maxResponseTimeMs),
+        noDataMessage: row ? null : "No monitoring data available"
       };
-    }).sort((left, right) => left.serviceKey.localeCompare(right.serviceKey) || left.bucket.localeCompare(right.bucket));
+    }));
 
     return { data };
   } finally {
     await connection.close();
   }
+}
+
+export async function recordScheduledInfrastructureHealthCheck() {
+  await getInfrastructureCurrent();
 }
 
 export async function getInfrastructureIncidents(inputRange: unknown = "30d") {
@@ -752,8 +973,8 @@ export async function getInfrastructureReports(inputRange: unknown = "30d") {
               MAX(support_team) AS support_team,
               MAX(contact_number) AS contact_number,
               COUNT(*) AS total_checks,
-              AVG(CASE WHEN status IN ('healthy', 'online') THEN 100 ELSE 0 END) AS availability_percent,
-              AVG(NVL(response_time_ms, latency_ms)) AS average_response_time_ms,
+              AVG(CASE WHEN status IN ('healthy', 'online', 'slow') THEN 100 ELSE 0 END) AS availability_percent,
+              AVG(response_time_ms) AS average_response_time_ms,
               SUM(CASE WHEN status IN ('offline', 'unknown') THEN 1 ELSE 0 END) AS downtime_checks,
               SUM(CASE WHEN status IN ('offline', 'slow', 'unknown') THEN 1 ELSE 0 END) AS incident_count
        FROM service_health_history

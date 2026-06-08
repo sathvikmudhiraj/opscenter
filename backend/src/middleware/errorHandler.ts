@@ -17,6 +17,7 @@ export function errorHandler(error: Error, _req: Request, res: Response, _next: 
 
   const statusCode = error instanceof HttpError ? error.statusCode : 500;
   res.status(statusCode).json({
-    message: error.message || "Internal server error"
+    message: error.message || "Internal server error",
+    ...(error instanceof HttpError ? error.details : {})
   });
 }

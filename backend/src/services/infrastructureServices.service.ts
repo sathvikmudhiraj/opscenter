@@ -194,7 +194,7 @@ async function ensureInfrastructureServiceSupportTable(connection: any) {
 }
 
 function mapRow(row: Record<string, any>): InfrastructureService {
-  return {
+  return withKnownSupportDefaults({
     id: String(row.ID),
     name: row.SERVICE_NAME,
     url: row.SERVICE_URL,
@@ -208,7 +208,20 @@ function mapRow(row: Record<string, any>): InfrastructureService {
     isDefault: Number(row.IS_DEFAULT) === 1,
     createdAt: row.CREATED_AT || null,
     updatedAt: row.UPDATED_AT || null
-  };
+  });
+}
+
+function withKnownSupportDefaults(service: InfrastructureService): InfrastructureService {
+  const normalizedName = service.name.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (normalizedName.includes("dynacon")) {
+    return {
+      ...service,
+      supportTeam: "Dynacon Support Team",
+      contactNumber: "2447",
+      escalationNote: "Contact Dynacon team if service is slow/offline/down."
+    };
+  }
+  return service;
 }
 
 async function readCustomServices(connection: any) {

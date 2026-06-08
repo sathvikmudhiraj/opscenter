@@ -30,9 +30,10 @@ const requestDecisionSchema = z.object({ status: z.enum(["approved", "rejected"]
 
 export const getAssets = asyncHandler(async (req, res) => {
   const mine = req.query.mine === "true" || req.query.mine === "1";
+  const assignedToUserId = req.user!.role === "employee" || mine ? req.user!.sub : undefined;
   res.json({
     data: await listAssets({
-      assignedToUserId: mine ? req.user!.sub : undefined,
+      assignedToUserId,
       requester: {
         id: req.user!.sub,
         username: req.user!.username,

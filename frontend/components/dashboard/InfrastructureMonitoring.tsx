@@ -174,11 +174,14 @@ function MonitoringPanel({ serviceKey, service, history, loading }: { serviceKey
   const key = service?.key || serviceKey;
   const Icon = icons[key];
   const status = service?.status || "unknown";
-  const chartData = history.map((point) => ({
+  const chartData = withIncidentMarkers(history.map((point) => ({
     label: new Date(point.checkedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-    value: key === "network-health" ? point.latencyMs ?? point.responseTimeMs ?? 0 : point.responseTimeMs ?? 0,
-    status: point.status
-  }));
+    checkedAt: point.checkedAt,
+    value: point.responseTimeMs,
+    markerValue: null as number | null,
+    status: point.status,
+    responseTimeMs: point.responseTimeMs
+  })));
 
   return (
     <article className="rounded-lg border border-slate-800 bg-slate-900/80 p-4 shadow-sm">
@@ -228,8 +231,9 @@ function MonitoringPanel({ serviceKey, service, history, loading }: { serviceKey
               <CartesianGrid stroke="#1e293b" strokeDasharray="3 3" />
               <XAxis dataKey="label" tick={{ fill: "#94a3b8", fontSize: 10 }} axisLine={false} tickLine={false} />
               <YAxis tick={{ fill: "#94a3b8", fontSize: 10 }} axisLine={false} tickLine={false} width={34} />
-              <Tooltip contentStyle={{ background: "#020617", border: "1px solid #334155", borderRadius: 8, color: "#e2e8f0" }} />
-              <Line type="monotone" dataKey="value" stroke="#22d3ee" strokeWidth={2} dot={(props: any) => <OutageDot {...props} />} />
+              <Tooltip content={<HistoryTooltip />} />
+              <Line type="monotone" dataKey="value" stroke="#22d3ee" strokeWidth={2} connectNulls dot={false} activeDot={{ r: 4, fill: "#22d3ee", stroke: "#020617", strokeWidth: 2 }} />
+              <Line type="monotone" dataKey="markerValue" stroke="transparent" strokeWidth={0} dot={(props: any) => <OutageDot {...props} />} activeDot={false} isAnimationActive={false} />
             </LineChart>
           </ResponsiveContainer>
         ) : (
@@ -242,8 +246,47 @@ function MonitoringPanel({ serviceKey, service, history, loading }: { serviceKey
 
 function OutageDot(props: any) {
   const status = props.payload?.status;
-  const incident = status === "offline" || status === "slow" || status === "unknown";
-  return <circle cx={props.cx} cy={props.cy} r={incident ? 4 : 2} fill={incident ? "#f97316" : "#22d3ee"} />;
+  if (props.value === null || props.value === undefined) return null;
+  if (status === "slow") return <circle cx={props.cx} cy={props.cy} r={4} fill="#f97316" stroke="#020617" strokeWidth={1.5} />;
+  if (status === "offline" || status === "unknown" || status === "cannot_verify") return <circle cx={props.cx} cy={props.cy} r={4} fill="#ef4444" stroke="#020617" strokeWidth={1.5} />;
+  return null;
+}
+
+function HistoryTooltip({ active, payload }: any) {
+  const point = payload?.[0]?.payload;
+  if (!active || !point) return null;
+  return (
+    <div className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-200 shadow-lg">
+      <p className="font-semibold text-white">{statusText(point.status)}</p>
+      <p className="mt-1">Checked time: {formatTime(point.checkedAt)}</p>
+      <p>Original response_time_ms: {formatMs(point.responseTimeMs)}</p>
+    </div>
+  );
+}
+
+function withIncidentMarkers<T extends { value: number | null; markerValue: number | null; status: string }>(points: T[]) {
+  return points.map((point, index) => {
+    if (point.status !== "slow" && point.status !== "offline" && point.status !== "unknown" && point.status !== "cannot_verify") return point;
+    return { ...point, markerValue: point.value ?? nearestValidValue(points, index) };
+  });
+}
+
+function nearestValidValue(points: Array<{ value: number | null }>, index: number) {
+  for (let offset = 1; offset < points.length; offset += 1) {
+    const previous = points[index - offset]?.value;
+    if (previous !== null && previous !== undefined) return previous;
+    const next = points[index + offset]?.value;
+    if (next !== null && next !== undefined) return next;
+  }
+  return null;
+}
+
+function statusText(status: string) {
+  if (status === "healthy" || status === "online") return "Online";
+  if (status === "slow") return "Slow";
+  if (status === "offline") return "Offline";
+  if (status === "unknown" || status === "cannot_verify") return "Cannot Verify";
+  return status || "Unknown";
 }
 
 function StatusBadge({ status, label }: { status: string; label: string }) {

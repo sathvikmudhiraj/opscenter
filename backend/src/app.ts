@@ -10,6 +10,18 @@ import { apiRouter } from "./routes";
 function skipGlobalRateLimit(req: express.Request) {
   const requestPath = (req.originalUrl || req.path || "").split("?")[0];
   if (req.method === "OPTIONS" || requestPath === "/api/notifications/events") return true;
+  if (
+    requestPath.startsWith("/api/client-agent/") ||
+    requestPath.startsWith("/client-agent/") ||
+    requestPath.startsWith("/api/client-connectivity/") ||
+    requestPath.startsWith("/client-connectivity/")
+  ) return true;
+  if (req.method === "GET" && (
+    requestPath === "/api/notifications" ||
+    requestPath === "/notifications" ||
+    requestPath.startsWith("/api/notifications/") ||
+    requestPath.startsWith("/notifications/")
+  )) return true;
   if (req.method === "GET" && (
     requestPath.startsWith("/api/infrastructure/") ||
     requestPath.startsWith("/infrastructure/") ||

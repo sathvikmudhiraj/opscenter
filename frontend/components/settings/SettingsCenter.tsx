@@ -87,6 +87,7 @@ export function SettingsCenter() {
   }, []);
 
   const section = settings[active] || {};
+  const sessionTimeoutError = getSessionTimeoutError(settings.security?.sessionTimeoutMinutes);
 
   function update(path: string, value: unknown) {
     setSettings((current) => {
@@ -99,6 +100,10 @@ export function SettingsCenter() {
 
   async function save(sectionKey: SectionKey) {
     if (sectionKey === "health") return;
+    if (sectionKey === "security" && sessionTimeoutError) {
+      setError(sessionTimeoutError);
+      return;
+    }
     setSaving(sectionKey);
     setError("");
     try {
@@ -191,7 +196,7 @@ export function SettingsCenter() {
             {active === "general" ? <General section={section} update={update} /> : null}
             {active === "sla" ? <Sla section={section} update={update} /> : null}
             {active === "notifications" ? <Notifications section={section} update={update} /> : null}
-            {active === "security" ? <Security section={section} update={update} /> : null}
+            {active === "security" ? <Security section={section} update={update} sessionTimeoutError={sessionTimeoutError} /> : null}
             {active === "assets" ? <Assets section={section} update={update} /> : null}
             {active === "email" ? <Email section={section} update={update} testEmail={testEmail} testing={saving === "email-test"} /> : null}
             {active === "infrastructure" ? <Infrastructure section={section} update={update} services={infrastructureServices} reload={load} setToast={setToast} setError={setError} /> : null}
@@ -206,6 +211,9 @@ export function SettingsCenter() {
 }
 
 function Field({ label, value, onChange, type = "text", suffix }: { label: string; value: any; onChange: (value: any) => void; type?: string; suffix?: string }) {
+  if (label === "Session Timeout Minutes") {
+    return <SessionTimeoutField value={value} error={getSessionTimeoutError(value)} onChange={onChange} />;
+  }
   return (
     <label className="block">
       <span className="text-sm font-medium text-slate-700">{label}</span>
@@ -254,8 +262,41 @@ function Notifications({ section, update }: any) {
   return <Grid>{Object.entries({ inAppEnabled: "Enable In-App Notifications", emailEnabled: "Enable Email Notifications", ticketAssignmentAlerts: "Ticket Assignment Alerts", ticketResolutionAlerts: "Ticket Resolution Alerts", slaBreachAlerts: "SLA Breach Alerts", assetAssignmentAlerts: "Asset Assignment Alerts", assetRequestAlerts: "Asset Request Alerts", serviceOutageAlerts: "Service Outage Alerts" }).map(([key, label]) => <Toggle key={key} label={label} checked={section[key]} onChange={(v) => update(`notifications.${key}`, v)} />)}</Grid>;
 }
 
-function Security({ section, update }: any) {
-  return <Grid><Field type="number" label="Minimum Password Length" value={section.minimumPasswordLength} onChange={(v) => update("security.minimumPasswordLength", v)} /><Toggle label="Require Uppercase" checked={section.requireUppercase} onChange={(v) => update("security.requireUppercase", v)} /><Toggle label="Require Lowercase" checked={section.requireLowercase} onChange={(v) => update("security.requireLowercase", v)} /><Toggle label="Require Numbers" checked={section.requireNumbers} onChange={(v) => update("security.requireNumbers", v)} /><Toggle label="Require Special Characters" checked={section.requireSpecialCharacters} onChange={(v) => update("security.requireSpecialCharacters", v)} /><Field type="number" label="Password Expiry Days" value={section.passwordExpiryDays} onChange={(v) => update("security.passwordExpiryDays", v)} /><Field type="number" label="Session Timeout Minutes" value={section.sessionTimeoutMinutes} onChange={(v) => update("security.sessionTimeoutMinutes", v)} /><Field type="number" label="Failed Login Limit" value={section.failedLoginLimit} onChange={(v) => update("security.failedLoginLimit", v)} /><Field type="number" label="Account Lockout Duration" value={section.accountLockoutDurationMinutes} suffix="min" onChange={(v) => update("security.accountLockoutDurationMinutes", v)} /><Toggle label="MFA Toggle" checked={section.mfaEnabled} onChange={(v) => update("security.mfaEnabled", v)} /><Toggle label="Audit Logging Toggle" checked={section.auditLoggingEnabled} onChange={(v) => update("security.auditLoggingEnabled", v)} /></Grid>;
+function Security({ section, update, sessionTimeoutError }: any) {
+  return <><div className="mb-4 rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">Production login protection uses configurable failed-attempt cooldown. Development lockout is disabled.</div><Grid><Field type="number" label="Minimum Password Length" value={section.minimumPasswordLength} onChange={(v) => update("security.minimumPasswordLength", v)} /><Toggle label="Require Uppercase" checked={section.requireUppercase} onChange={(v) => update("security.requireUppercase", v)} /><Toggle label="Require Lowercase" checked={section.requireLowercase} onChange={(v) => update("security.requireLowercase", v)} /><Toggle label="Require Numbers" checked={section.requireNumbers} onChange={(v) => update("security.requireNumbers", v)} /><Toggle label="Require Special Characters" checked={section.requireSpecialCharacters} onChange={(v) => update("security.requireSpecialCharacters", v)} /><Field type="number" label="Password Expiry Days" value={section.passwordExpiryDays} onChange={(v) => update("security.passwordExpiryDays", v)} /><Field type="number" label="Session Timeout Minutes" value={section.sessionTimeoutMinutes} onChange={(v) => update("security.sessionTimeoutMinutes", v)} /><Field type="number" label="Failed Login Limit" value={section.failedLoginLimit} onChange={(v) => update("security.failedLoginLimit", v)} /><Toggle label="Cooldown Enabled" checked={section.cooldownEnabled} onChange={(v) => update("security.cooldownEnabled", v)} /><Field type="number" label="Cooldown Duration Minutes" value={section.cooldownDurationMinutes} onChange={(v) => update("security.cooldownDurationMinutes", v)} /><Toggle label="Escalating Cooldown Enabled" checked={section.escalatingCooldownEnabled} onChange={(v) => update("security.escalatingCooldownEnabled", v)} /><Field type="number" label="Maximum Cooldown Minutes" value={section.maximumCooldownMinutes} onChange={(v) => update("security.maximumCooldownMinutes", v)} /><Toggle label="Admin Manual Unlock Enabled" checked={section.adminManualUnlockEnabled} onChange={(v) => update("security.adminManualUnlockEnabled", v)} /><Toggle label="MFA Toggle" checked={section.mfaEnabled} onChange={(v) => update("security.mfaEnabled", v)} /><Toggle label="Audit Logging Toggle" checked={section.auditLoggingEnabled} onChange={(v) => update("security.auditLoggingEnabled", v)} /></Grid></>;
+}
+
+function SessionTimeoutField({ value, error, onChange }: { value: unknown; error: string; onChange: (value: number | "") => void }) {
+  return (
+    <label className="block">
+      <span className="text-sm font-medium text-slate-700">Session Timeout Minutes</span>
+      <div className={`mt-1 flex rounded-md border bg-white focus-within:ring-4 ${error ? "border-red-400 focus-within:border-red-500 focus-within:ring-red-100" : "border-slate-300 focus-within:border-blue-600 focus-within:ring-blue-100"}`}>
+        <input
+          type="text"
+          inputMode="numeric"
+          pattern="[0-9]*"
+          value={typeof value === "number" || typeof value === "string" ? value : ""}
+          onChange={(event) => {
+            const next = event.target.value;
+            if (/^\d*$/.test(next)) onChange(next === "" ? "" : Number(next));
+          }}
+          className="min-w-0 flex-1 rounded-md px-3 py-2 text-sm outline-none"
+        />
+        <span className="border-l border-slate-200 px-3 py-2 text-sm text-slate-500">min</span>
+      </div>
+      <p className={`mt-1 text-xs ${error ? "font-medium text-red-600" : "text-slate-500"}`}>
+        {error || "Session timeout can be set between 5 and 1440 minutes."}
+      </p>
+    </label>
+  );
+}
+
+function getSessionTimeoutError(value: unknown) {
+  if (value === "" || typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value)) {
+    return "Session timeout must be a whole number";
+  }
+  if (value < 5 || value > 1440) return "Session timeout must be between 5 and 1440 minutes.";
+  return "";
 }
 
 function Assets({ section, update }: any) {

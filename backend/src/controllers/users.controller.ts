@@ -1,6 +1,10 @@
 import { z } from "zod";
 import { createUser, deleteUser, listUsers, resetPassword, updateUser, updateUserRole, updateUserStatus } from "../services/user.service";
 import { asyncHandler } from "../utils/asyncHandler";
+import { unlockLogin } from "../services/auth.service";
+import { writeAuditLog } from "../services/audit.service";
+import { getSystemSettings } from "../services/settings.service";
+import { HttpError } from "../utils/httpError";
 
 const roleSchema = z.object({
   role: z.enum(["employee", "engineer", "admin"])
@@ -23,6 +27,7 @@ const userSchema = z.object({
 });
 
 const userUpdateSchema = userSchema.omit({ password: true }).partial();
+const unlockSchema = z.object({ username: z.string().min(2) });
 
 export const getUsers = asyncHandler(async (_req, res) => {
   res.json({ data: await listUsers() });
@@ -54,6 +59,21 @@ export const patchUserStatus = asyncHandler(async (req, res) => {
 export const resetUserPassword = asyncHandler(async (req, res) => {
   const result = await resetPassword({ id: Number(req.params.id), actorId: req.user!.sub });
   res.json({ message: "Password reset", data: result });
+});
+
+export const unlockUserAccount = asyncHandler(async (req, res) => {
+  const input = unlockSchema.parse(req.body);
+  const settings = await getSystemSettings();
+  if (!settings.security.adminManualUnlockEnabled) {
+    throw new HttpError(403, "Manual unlock is disabled in security settings");
+  }
+  const result = unlockLogin(input.username);
+  await writeAuditLog({
+    userId: req.user!.sub,
+    action: "account_unlocked_by_admin",
+    details: `${result.username} login cooldown cleared by admin.`
+  });
+  res.json({ message: "Account unlocked", data: result });
 });
 
 export const removeUser = asyncHandler(async (req, res) => {

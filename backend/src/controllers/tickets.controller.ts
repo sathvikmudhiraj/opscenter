@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { assignTicketToEngineer, createTicket, escalateTicketById, getTicketById, listTickets, saveEngineerAction, updateTicketPriority, updateTicketStatus } from "../services/ticket.service";
 import { asyncHandler } from "../utils/asyncHandler";
+import { HttpError } from "../utils/httpError";
 
 const ticketFilterSchema = z.object({
   search: z.string().optional(),
@@ -49,8 +50,30 @@ const engineerActionSchema = z.object({
   remarks: z.string().optional()
 });
 
+function requireTicketAccess(ticket: any, user: NonNullable<Express.Request["user"]>) {
+  if (!ticket) throw new HttpError(404, "Ticket not found");
+  if (user.role === "admin") return;
+  if (user.role === "employee" && Number(ticket.REQUESTER_USER_ID) === user.sub) return;
+  if (user.role === "engineer" && Number(ticket.ASSIGNED_TO_USER_ID) === user.sub) return;
+  throw new HttpError(403, "Ticket access denied");
+}
+
+async function requireTicketForUser(ticketId: number, user: NonNullable<Express.Request["user"]>) {
+  const ticket = await getTicketById(ticketId);
+  requireTicketAccess(ticket, user);
+  return ticket;
+}
+
 export const getTickets = asyncHandler(async (req, res) => {
-  const filters = ticketFilterSchema.parse(req.query);
+  const requestedFilters = ticketFilterSchema.parse(req.query);
+  const filters = { ...requestedFilters };
+  if (req.user!.role === "employee") {
+    filters.requesterId = String(req.user!.sub);
+    delete filters.assignedTo;
+  } else if (req.user!.role === "engineer") {
+    filters.assignedTo = String(req.user!.sub);
+    delete filters.requesterId;
+  }
   console.info("[tickets] Current user loading tickets", {
     userId: req.user?.sub,
     username: req.user?.username,
@@ -63,7 +86,7 @@ export const getTickets = asyncHandler(async (req, res) => {
 });
 
 export const getTicket = asyncHandler(async (req, res) => {
-  res.json({ data: await getTicketById(Number(req.params.id)) });
+  res.json({ data: await requireTicketForUser(Number(req.params.id), req.user!) });
 });
 
 export const postTicket = asyncHandler(async (req, res) => {
@@ -90,6 +113,7 @@ export const assignTicket = asyncHandler(async (req, res) => {
 
 export const patchTicketStatus = asyncHandler(async (req, res) => {
   const input = statusSchema.parse(req.body);
+  await requireTicketForUser(Number(req.params.id), req.user!);
   await updateTicketStatus({ ticketId: Number(req.params.id), status: input.status, message: input.message, actorId: req.user!.sub });
   res.json({ message: "Ticket updated" });
 });
@@ -101,12 +125,14 @@ export const patchTicketPriority = asyncHandler(async (req, res) => {
 });
 
 export const escalateTicket = asyncHandler(async (req, res) => {
+  await requireTicketForUser(Number(req.params.id), req.user!);
   await escalateTicketById({ ticketId: Number(req.params.id), actorId: req.user!.sub });
   res.json({ message: "Ticket escalated" });
 });
 
 export const patchEngineerAction = asyncHandler(async (req, res) => {
   const input = engineerActionSchema.parse(req.body);
+  await requireTicketForUser(Number(req.params.id), req.user!);
   await saveEngineerAction({ ticketId: Number(req.params.id), actorId: req.user!.sub, ...input });
   res.json({ message: "Engineer action saved" });
 });

@@ -51,6 +51,11 @@ export type SystemSettings = {
     passwordExpiryDays: number;
     sessionTimeoutMinutes: number;
     failedLoginLimit: number;
+    cooldownEnabled: boolean;
+    cooldownDurationMinutes: number;
+    escalatingCooldownEnabled: boolean;
+    maximumCooldownMinutes: number;
+    adminManualUnlockEnabled: boolean;
     accountLockoutDurationMinutes: number;
     mfaEnabled: boolean;
     auditLoggingEnabled: boolean;
@@ -124,7 +129,12 @@ const defaults: SystemSettings = {
     passwordExpiryDays: 90,
     sessionTimeoutMinutes: 480,
     failedLoginLimit: 5,
-    accountLockoutDurationMinutes: 30,
+    cooldownEnabled: true,
+    cooldownDurationMinutes: 1,
+    escalatingCooldownEnabled: true,
+    maximumCooldownMinutes: 5,
+    adminManualUnlockEnabled: true,
+    accountLockoutDurationMinutes: 1,
     mfaEnabled: false,
     auditLoggingEnabled: true
   },
@@ -229,9 +239,14 @@ function sanitizeSettings(input: unknown): SystemSettings {
       requireNumbers: toBool(merged.security.requireNumbers, true),
       requireSpecialCharacters: toBool(merged.security.requireSpecialCharacters, false),
       passwordExpiryDays: numberInRange(merged.security.passwordExpiryDays, 90, 0, 3650),
-      sessionTimeoutMinutes: numberInRange(merged.security.sessionTimeoutMinutes, 480, 5, 10080),
-      failedLoginLimit: numberInRange(merged.security.failedLoginLimit, 5, 1, 50),
-      accountLockoutDurationMinutes: numberInRange(merged.security.accountLockoutDurationMinutes, 30, 1, 1440),
+      sessionTimeoutMinutes: numberInRange(merged.security.sessionTimeoutMinutes, defaults.security.sessionTimeoutMinutes, 5, 1440),
+      failedLoginLimit: numberInRange(merged.security.failedLoginLimit, defaults.security.failedLoginLimit, 1, 20),
+      cooldownEnabled: toBool(merged.security.cooldownEnabled, true),
+      cooldownDurationMinutes: numberInRange(merged.security.cooldownDurationMinutes ?? merged.security.accountLockoutDurationMinutes, defaults.security.cooldownDurationMinutes, 1, 1440),
+      escalatingCooldownEnabled: toBool(merged.security.escalatingCooldownEnabled, true),
+      maximumCooldownMinutes: numberInRange(merged.security.maximumCooldownMinutes, defaults.security.maximumCooldownMinutes, 1, 1440),
+      adminManualUnlockEnabled: toBool(merged.security.adminManualUnlockEnabled, true),
+      accountLockoutDurationMinutes: numberInRange(merged.security.cooldownDurationMinutes ?? merged.security.accountLockoutDurationMinutes, defaults.security.accountLockoutDurationMinutes, 1, 1440),
       mfaEnabled: toBool(merged.security.mfaEnabled, false),
       auditLoggingEnabled: toBool(merged.security.auditLoggingEnabled, true)
     },
@@ -284,6 +299,10 @@ function clobBind(value: string) {
   return { val: value, type: oracledb.CLOB };
 }
 
+function defaultSectionJson(section: SettingsSection) {
+  return JSON.stringify((defaults as any)[section]);
+}
+
 async function tableExists(connection: any, tableName: string) {
   const result = await connection.execute(
     `SELECT COUNT(*) AS count FROM user_tables WHERE table_name = :tableName`,
@@ -293,6 +312,7 @@ async function tableExists(connection: any, tableName: string) {
 }
 
 export async function ensureSettingsTables(connection: any) {
+  let settingsSeeded = false;
   if (!await tableExists(connection, "SYSTEM_SETTINGS")) {
     await connection.execute(
       `CREATE TABLE system_settings (
@@ -315,6 +335,38 @@ export async function ensureSettingsTables(connection: any) {
       )`
     );
     await connection.execute(`CREATE INDEX idx_settings_history_key_time ON settings_history(setting_key, changed_at)`);
+  }
+  const securityResult = await connection.execute(
+    `SELECT setting_value FROM system_settings WHERE setting_key = 'security'`
+  );
+  const securityRow = ((securityResult.rows || []) as Array<{ SETTING_VALUE?: string }>)[0];
+  if (!securityRow) {
+    await connection.execute(
+      `INSERT INTO system_settings (setting_key, setting_value, updated_by)
+       VALUES ('security', :settingValue, NULL)`,
+      { settingValue: clobBind(defaultSectionJson("security")) }
+    );
+    settingsSeeded = true;
+  } else {
+    let currentSecurity: unknown = {};
+    try {
+      currentSecurity = JSON.parse(securityRow.SETTING_VALUE || "{}");
+    } catch {
+      currentSecurity = {};
+    }
+    const upgradedSecurity = deepMerge(defaults.security, currentSecurity);
+    if (JSON.stringify(upgradedSecurity) !== JSON.stringify(currentSecurity)) {
+      await connection.execute(
+        `UPDATE system_settings
+         SET setting_value = :settingValue, updated_at = CURRENT_TIMESTAMP
+         WHERE setting_key = 'security'`,
+        { settingValue: clobBind(JSON.stringify(upgradedSecurity)) }
+      );
+      settingsSeeded = true;
+    }
+  }
+  if (settingsSeeded) {
+    await connection.commit();
   }
 }
 
@@ -347,6 +399,7 @@ export async function getSystemSettings(options: { masked?: boolean; force?: boo
 }
 
 export async function updateSystemSettings(input: { actorId: number; section?: SettingsSection; values: unknown }) {
+  validateSessionTimeoutUpdate(input.section, input.values);
   const connection = await getConnection();
   try {
     await ensureSettingsTables(connection);
@@ -385,6 +438,23 @@ export async function updateSystemSettings(input: { actorId: number; section?: S
   } finally {
     await connection.close();
   }
+}
+
+function validateSessionTimeoutUpdate(section: SettingsSection | undefined, values: unknown) {
+  if (!values || typeof values !== "object") return;
+  const valuesRecord = values as Record<string, unknown>;
+  const security = section === "security"
+    ? valuesRecord
+    : valuesRecord.security && typeof valuesRecord.security === "object"
+      ? valuesRecord.security as Record<string, unknown>
+      : null;
+  if (!security || security.sessionTimeoutMinutes === undefined) return;
+
+  const value = security.sessionTimeoutMinutes;
+  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value)) {
+    throw new HttpError(400, "Session timeout must be a whole number");
+  }
+  if (value < 5 || value > 1440) throw new HttpError(400, "Session timeout must be between 5 and 1440 minutes.");
 }
 
 async function recalculateActiveTicketSlaDeadlines(connection: any, settings: SystemSettings) {

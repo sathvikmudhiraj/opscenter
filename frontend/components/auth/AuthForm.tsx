@@ -27,11 +27,19 @@ export function LoginForm() {
     }
   }, []);
 
-  function errorMessage(message: string) {
+  function errorMessage(requestError: unknown) {
+    const message = requestError instanceof Error ? requestError.message : "";
     const normalized = message.toLowerCase();
+    const remainingSeconds = typeof requestError === "object" && requestError && "remainingSeconds" in requestError
+      ? Number(requestError.remainingSeconds)
+      : 0;
+
     if (normalized.includes("disabled")) return "Account disabled. Please contact your administrator.";
+    if (normalized.includes("too many failed attempts") || remainingSeconds > 0) {
+      return `Too many failed attempts. Try again in ${formatCooldown(Math.max(1, remainingSeconds))}.`;
+    }
     if (normalized.includes("not found")) return "User not found. Check your User ID.";
-    if (normalized.includes("invalid")) return "Invalid credentials. Check your User ID and password.";
+    if (normalized.includes("invalid")) return "Invalid credentials";
     return "Unable to sign in right now. Please try again.";
   }
 
@@ -50,8 +58,7 @@ export function LoginForm() {
       saveSession(data);
       window.location.assign(data.user.forcePasswordChange ? "/change-password" : getDashboardPath(data.user.role));
     } catch (requestError) {
-      const message = requestError instanceof Error ? requestError.message : "";
-      setError(errorMessage(message));
+      setError(errorMessage(requestError));
     } finally {
       setLoading(false);
     }
@@ -96,6 +103,13 @@ export function LoginForm() {
       <p className="text-center text-xs font-medium text-slate-500">Secure login. All activity is monitored.</p>
     </form>
   );
+}
+
+function formatCooldown(totalSeconds: number) {
+  if (totalSeconds <= 60) return `${totalSeconds} seconds`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return seconds ? `${minutes} minute${minutes === 1 ? "" : "s"} ${seconds} seconds` : `${minutes} minute${minutes === 1 ? "" : "s"}`;
 }
 
 export function SetupAdminForm() {
