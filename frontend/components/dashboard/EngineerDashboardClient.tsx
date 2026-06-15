@@ -114,7 +114,7 @@ export function EngineerDashboardClient() {
 
       <div className="grid gap-5 xl:grid-cols-2">
         <ChartCard title="Tickets by Status" loading={loading} empty={!hasStatusData}>
-          <ResponsiveContainer width="100%" height={260}>
+          <ResponsiveContainer width="100%" height={260} initialDimension={{ width: 480, height: 260 }}>
             <BarChart data={statusChartData} margin={{ top: 12, right: 8, left: -24, bottom: 0 }}>
               <XAxis dataKey="name" tick={{ fontSize: 12, fill: "#64748b" }} axisLine={false} tickLine={false} />
               <YAxis allowDecimals={false} tick={{ fontSize: 12, fill: "#64748b" }} axisLine={false} tickLine={false} />
@@ -124,7 +124,7 @@ export function EngineerDashboardClient() {
           </ResponsiveContainer>
         </ChartCard>
         <ChartCard title="Tickets by Category" loading={loading} empty={!hasCategoryData}>
-          <ResponsiveContainer width="100%" height={220}>
+          <ResponsiveContainer width="100%" height={220} initialDimension={{ width: 480, height: 220 }}>
             <PieChart>
               <Pie data={categoryChartData} dataKey="value" nameKey="name" innerRadius={52} outerRadius={86} paddingAngle={3}>
                 {categoryChartData.map((entry, index) => <Cell key={entry.name} fill={categoryColors[index % categoryColors.length]} />)}

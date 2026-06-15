@@ -28,6 +28,40 @@ export type UpdateUserInput = Partial<Omit<CreateUserInput, "password" | "actorI
   actorId: number;
 };
 
+function isOracleChildRecordError(error: unknown) {
+  return typeof error === "object"
+    && error !== null
+    && (("errorNum" in error && error.errorNum === 2292)
+      || ("message" in error && typeof error.message === "string" && error.message.includes("ORA-02292")));
+}
+
+async function clearDeletableUserReferences(connection: any, userId: number) {
+  const result = await connection.execute(
+    `SELECT c.table_name, cc.column_name, tc.nullable
+     FROM user_constraints c
+     JOIN user_cons_columns cc ON cc.constraint_name = c.constraint_name
+     JOIN user_constraints parent ON parent.constraint_name = c.r_constraint_name
+     JOIN user_tab_columns tc ON tc.table_name = c.table_name AND tc.column_name = cc.column_name
+     WHERE c.constraint_type = 'R'
+       AND parent.table_name = 'USERS'
+       AND c.delete_rule = 'NO ACTION'`
+  );
+  const references = (result.rows || []) as Array<{ TABLE_NAME: string; COLUMN_NAME: string; NULLABLE: "Y" | "N" }>;
+
+  for (const reference of references) {
+    if (reference.TABLE_NAME === "PASSWORD_RESET_REQUESTS" && reference.COLUMN_NAME === "USER_ID") {
+      await connection.execute(`DELETE FROM password_reset_requests WHERE user_id = :userId`, { userId });
+      continue;
+    }
+    if (reference.NULLABLE === "Y") {
+      await connection.execute(
+        `UPDATE ${reference.TABLE_NAME} SET ${reference.COLUMN_NAME} = NULL WHERE ${reference.COLUMN_NAME} = :userId`,
+        { userId }
+      );
+    }
+  }
+}
+
 async function getUserColumns(connection: any) {
   const result = await connection.execute(
     `SELECT column_name
@@ -259,13 +293,18 @@ export async function deleteUser(input: { id: number; actorId: number }) {
     const user = (userResult.rows || [])[0] as { USERNAME: string } | undefined;
     if (!user) throw new HttpError(404, "User not found");
     if (user.USERNAME === "admin") throw new HttpError(400, "The built-in admin account cannot be deleted");
+    if (input.id === input.actorId) throw new HttpError(400, "You cannot delete your own signed-in account");
 
+    await clearDeletableUserReferences(connection, input.id);
     await connection.execute(`DELETE FROM users WHERE id = :id`, { id: input.id });
     await writeAuditLog({ userId: input.actorId, action: "user_deleted", details: `${user.USERNAME} deleted.` }, connection);
     await connection.commit();
   } catch (error) {
     await connection.rollback();
     console.info(`[oracle] User delete failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    if (isOracleChildRecordError(error)) {
+      throw new HttpError(409, "This user cannot be deleted because required operational records still reference the account. Deactivate the account instead.");
+    }
     throw error;
   } finally {
     await connection.close();

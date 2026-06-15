@@ -205,7 +205,7 @@ export function UserRoleManager() {
   }
 
   async function deleteUser(user: ManagedUser) {
-    if (!window.confirm(`Delete ${user.loginId}?`)) return;
+    if (!window.confirm(`Permanently delete ${user.loginId}? Password-reset records and optional assignments linked to this user will also be cleared.`)) return;
     setSavingId(user.id);
     setMessage("");
     try {

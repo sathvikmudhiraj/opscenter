@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { Activity, AlertTriangle, Download, Globe2, Mail, Network, ShieldCheck, Timer, WifiOff } from "lucide-react";
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
@@ -212,8 +212,43 @@ type ClientAgentServiceHistoryRow = {
   checkedAt: string;
 };
 
+type ServerPayload = {
+  current: ServiceHealth[];
+  history: HistoryPoint[];
+  heatmap: HeatmapPoint[];
+  incidents: Incident[];
+  reports: ReportRow[];
+  services: InfrastructureServiceConfig[];
+};
+
+type ClientPayload = {
+  samples?: ClientSample[];
+  historyRows?: ClientConnectivityHistoryRow[];
+  summary?: ClientConnectivitySummary | null;
+  agentHistory?: ClientAgentServiceHistoryRow[];
+};
+
+function settledData<T>(
+  result: PromiseSettledResult<{ data: { data?: T[] } }>,
+  fallback: T[]
+) {
+  if (result.status !== "fulfilled") return Array.isArray(fallback) ? fallback : [];
+  return Array.isArray(result.value.data.data) ? result.value.data.data : [];
+}
+
+function useDebouncedValue<T>(value: T, delayMs: number) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timeout = window.setTimeout(() => setDebounced(value), delayMs);
+    return () => window.clearTimeout(timeout);
+  }, [delayMs, value]);
+  return debounced;
+}
+
 const ranges: RangeKey[] = ["24h", "7d", "30d"];
 const clientSampleIntervalMs = 30000;
+const infrastructureCacheMs = 30000;
+const activeViewRefreshMs = 60000;
 const browserCannotVerifyMessage = "Browser could not verify this service. This is not confirmed service latency.";
 const serviceOrder: ServiceKey[] = ["hpep-intranet", "bhel-webmail", "network-health"];
 const clientLocalOrder: ServiceKey[] = ["client-internet", "client-intranet", "client-backend-api"];
@@ -258,78 +293,95 @@ export function InfrastructureMonitoringPage() {
   const [refreshMs, setRefreshMs] = useState(60000);
   const inFlightRef = useRef(false);
   const clientCheckInFlightRef = useRef(false);
-  const initialLoadRef = useRef(false);
+  const serverCacheRef = useRef(new Map<string, { timestamp: number; data: ServerPayload }>());
+  const clientCacheRef = useRef(new Map<string, { timestamp: number; data: ClientPayload }>());
+  const serverAbortRef = useRef<AbortController | null>(null);
+  const clientMineAbortRef = useRef<AbortController | null>(null);
+  const clientAdminAbortRef = useRef<AbortController | null>(null);
   const sessionUser = getSessionUser();
   const isAdmin = sessionUser?.role === "admin";
 
-  async function load(selectedRange = range) {
+  const applyServerPayload = useCallback((payload: ServerPayload) => {
+    setCurrent(payload.current);
+    setHistory(payload.history);
+    setHeatmap(payload.heatmap);
+    setIncidents(payload.incidents);
+    setReports(payload.reports);
+    setInfrastructureServices(payload.services);
+  }, []);
+
+  const load = useCallback(async (selectedRange = range, options: { force?: boolean } = {}) => {
     if (inFlightRef.current) return;
     if (!getSessionToken()) {
       setError("");
       setLoading(false);
       return;
     }
-    inFlightRef.current = true;
-    try {
-      const [currentResp, historyResp, heatmapResp, incidentsResp, reportsResp, servicesResp] = await Promise.all([
-        api.get<{ data: ServiceHealth[] }>("/infrastructure/current"),
-        api.get<{ data: HistoryPoint[] }>(`/infrastructure/history?range=${selectedRange}`),
-        api.get<{ data: HeatmapPoint[] }>(`/infrastructure/heatmap?range=${selectedRange}`),
-        api.get<{ data: Incident[] }>(`/infrastructure/incidents?range=${selectedRange}`),
-        api.get<{ data: ReportRow[] }>(`/infrastructure/reports?range=${selectedRange}`),
-        api.get<{ data: InfrastructureServiceConfig[] }>("/infrastructure-services")
-      ]);
-      setCurrent(currentResp.data.data || []);
-      setHistory(historyResp.data.data || []);
-      setHeatmap(heatmapResp.data.data || []);
-      setIncidents(incidentsResp.data.data || []);
-      setReports(reportsResp.data.data || []);
-      setInfrastructureServices(servicesResp.data.data || []);
+    const cacheKey = `server:${selectedRange}`;
+    const cached = serverCacheRef.current.get(cacheKey);
+    if (!options.force && cached && Date.now() - cached.timestamp < infrastructureCacheMs) {
+      applyServerPayload(cached.data);
+      setLoading(false);
       setError("");
+      return;
+    }
+    inFlightRef.current = true;
+    serverAbortRef.current?.abort();
+    const controller = new AbortController();
+    serverAbortRef.current = controller;
+    setLoading((previous) => previous || !cached);
+    try {
+      const [currentResp, historyResp, heatmapResp, incidentsResp, reportsResp, servicesResp] = await Promise.allSettled([
+        api.get<{ data: ServiceHealth[] }>("/infrastructure/current", { signal: controller.signal }),
+        api.get<{ data: HistoryPoint[] }>(`/infrastructure/history?range=${selectedRange}`, { signal: controller.signal }),
+        api.get<{ data: HeatmapPoint[] }>(`/infrastructure/heatmap?range=${selectedRange}`, { signal: controller.signal }),
+        api.get<{ data: Incident[] }>(`/infrastructure/incidents?range=${selectedRange}`, { signal: controller.signal }),
+        api.get<{ data: ReportRow[] }>(`/infrastructure/reports?range=${selectedRange}`, { signal: controller.signal }),
+        api.get<{ data: InfrastructureServiceConfig[] }>("/infrastructure-services", { signal: controller.signal })
+      ]);
+      if ([currentResp, historyResp, heatmapResp, incidentsResp, reportsResp, servicesResp].some((result) => result.status === "rejected" && axios.isCancel(result.reason))) return;
+      const payload: ServerPayload = {
+        current: settledData(currentResp, current),
+        history: settledData(historyResp, history),
+        heatmap: settledData(heatmapResp, heatmap),
+        incidents: settledData(incidentsResp, incidents),
+        reports: settledData(reportsResp, reports),
+        services: settledData(servicesResp, infrastructureServices)
+      };
+      serverCacheRef.current.set(cacheKey, { timestamp: Date.now(), data: payload });
+      applyServerPayload(payload);
+      const failedSections = [currentResp, historyResp, heatmapResp, incidentsResp, reportsResp, servicesResp].filter((result) => result.status === "rejected").length;
+      setError(failedSections ? "Some infrastructure sections could not be refreshed. Showing the latest available data." : "");
     } catch (requestError) {
+      if (axios.isCancel(requestError)) return;
       setError(requestError instanceof Error ? requestError.message : "Infrastructure monitoring could not be loaded.");
     } finally {
       setLoading(false);
       inFlightRef.current = false;
     }
-  }
+  }, [applyServerPayload, current, heatmap, history, incidents, infrastructureServices, range, reports]);
 
   useEffect(() => {
     let active = true;
-    async function guardedLoad() {
-      if (active) await load();
-    }
     api.get<{ data?: { infrastructure?: { monitoringIntervalSeconds?: number } } }>("/settings")
       .then(({ data }) => {
         const seconds = Number(data.data?.infrastructure?.monitoringIntervalSeconds || 60);
-        if (active) setRefreshMs(Math.max(10000, seconds * 1000));
+        if (active) setRefreshMs(Math.max(activeViewRefreshMs, seconds * 1000));
       })
       .catch(() => undefined);
-    initialLoadRef.current = true;
-    guardedLoad();
     return () => {
       active = false;
     };
   }, []);
 
   useEffect(() => {
-    const refresh = window.setInterval(() => load(range), refreshMs);
+    if (viewMode !== "server") return undefined;
+    void load(range);
+    const refresh = window.setInterval(() => {
+      if (document.visibilityState === "visible") void load(range, { force: true });
+    }, refreshMs);
     return () => window.clearInterval(refresh);
-  }, [refreshMs, range]);
-
-  useEffect(() => {
-    if (initialLoadRef.current) {
-      initialLoadRef.current = false;
-      return;
-    }
-    if (viewMode === "client") {
-      loadMyClientConnectivityHistory(range).catch(() => undefined);
-      if (isAdmin) loadClientConnectivityHistory({ ...clientHistoryFilters, range }).catch(() => undefined);
-    } else {
-      setLoading(true);
-      load(range);
-    }
-  }, [range, viewMode]);
+  }, [load, refreshMs, range, viewMode]);
 
   const clientServices = useMemo(() => buildClientServices(infrastructureServices, current), [infrastructureServices, current]);
 
@@ -337,7 +389,9 @@ export function InfrastructureMonitoringPage() {
     if (viewMode !== "client") return;
     loadMyClientConnectivityHistory(range).catch(() => undefined);
     void runClientChecks();
-    const refresh = window.setInterval(() => void runClientChecks(), clientSampleIntervalMs);
+    const refresh = window.setInterval(() => {
+      if (document.visibilityState === "visible") void runClientChecks();
+    }, activeViewRefreshMs);
     return () => window.clearInterval(refresh);
   }, [viewMode, clientServices.length, range]);
 
@@ -351,7 +405,7 @@ export function InfrastructureMonitoringPage() {
       Promise.all(samples.map((sample) => saveClientSample(sample)))
         .then(() => {
           void loadMyClientConnectivityHistory(range);
-          if (isAdmin) return loadClientConnectivityHistory();
+          if (isAdmin) return loadClientConnectivityHistory({ ...clientHistoryFilters, range });
           return undefined;
         })
         .catch(() => undefined);
@@ -363,15 +417,28 @@ export function InfrastructureMonitoringPage() {
 
   async function loadMyClientConnectivityHistory(selectedRange = range) {
     if (!getSessionToken()) return;
+    const cacheKey = `client:mine:${selectedRange}:${clientServices.map((service) => service.key).join("|")}`;
+    const cached = clientCacheRef.current.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < infrastructureCacheMs && cached.data.samples) {
+      setClientSamples(cached.data.samples);
+      return;
+    }
     setClientHistoryLoading(true);
+    clientMineAbortRef.current?.abort();
+    const controller = new AbortController();
+    clientMineAbortRef.current = controller;
     try {
       const response = await axios.get<{ data: ClientConnectivityHistoryRow[] }>(`${getApiBaseUrl()}/client-connectivity/my-history?range=${selectedRange}`, {
         headers: {
           Authorization: `Bearer ${getSessionToken() || ""}`
-        }
+        },
+        signal: controller.signal
       });
-      setClientSamples(clientHistoryRowsToSamples(response.data.data || [], clientServices));
-    } catch {
+      const samples = clientHistoryRowsToSamples(response.data.data || [], clientServices);
+      clientCacheRef.current.set(cacheKey, { timestamp: Date.now(), data: { samples } });
+      setClientSamples(samples);
+    } catch (requestError) {
+      if (axios.isCancel(requestError)) return;
       // Saved client history should not interrupt live checks.
     } finally {
       setClientHistoryLoading(false);
@@ -384,35 +451,56 @@ export function InfrastructureMonitoringPage() {
     Object.entries(filters).forEach(([key, value]) => {
       if (value) params.set(key, value);
     });
+    const cacheKey = `client:admin:${params.toString() || "default"}`;
+    const cached = clientCacheRef.current.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < infrastructureCacheMs) {
+      if (cached.data.historyRows) setClientHistoryRows(cached.data.historyRows);
+      if (cached.data.summary !== undefined) setClientSummary(cached.data.summary);
+      if (cached.data.agentHistory) setAgentServiceHistory(cached.data.agentHistory);
+      return;
+    }
+    clientAdminAbortRef.current?.abort();
+    const controller = new AbortController();
+    clientAdminAbortRef.current = controller;
     try {
       const [response, summaryResponse, agentHistoryResponse] = await Promise.all([
         axios.get<{ data: ClientConnectivityHistoryRow[] }>(`${getApiBaseUrl()}/client-connectivity/history${params.toString() ? `?${params.toString()}` : ""}`, {
           headers: {
             Authorization: `Bearer ${getSessionToken() || ""}`
-          }
+          },
+          signal: controller.signal
         }),
         axios.get<{ data: ClientConnectivitySummary }>(`${getApiBaseUrl()}/client-agent/summary`, {
           headers: {
             Authorization: `Bearer ${getSessionToken() || ""}`
-          }
+          },
+          signal: controller.signal
         }),
         axios.get<{ data: ClientAgentServiceHistoryRow[] }>(`${getApiBaseUrl()}/client-agent/service-history?range=${filters.range || "24h"}`, {
           headers: {
             Authorization: `Bearer ${getSessionToken() || ""}`
-          }
+          },
+          signal: controller.signal
         })
       ]);
-      setClientHistoryRows(response.data.data || []);
-      setClientSummary(summaryResponse.data.data);
-      setAgentServiceHistory(agentHistoryResponse.data.data || []);
-    } catch {
+      const payload: ClientPayload = {
+        historyRows: Array.isArray(response.data.data) ? response.data.data : [],
+        summary: summaryResponse.data.data,
+        agentHistory: Array.isArray(agentHistoryResponse.data.data) ? agentHistoryResponse.data.data : []
+      };
+      clientCacheRef.current.set(cacheKey, { timestamp: Date.now(), data: payload });
+      setClientHistoryRows(payload.historyRows || []);
+      setClientSummary(payload.summary || null);
+      setAgentServiceHistory(payload.agentHistory || []);
+    } catch (requestError) {
+      if (axios.isCancel(requestError)) return;
       // Background admin history refresh should not interrupt the monitoring UI.
     }
   }
 
   useEffect(() => {
-    if (isAdmin) loadClientConnectivityHistory().catch(() => undefined);
-  }, [isAdmin]);
+    if (viewMode === "client" && isAdmin) loadClientConnectivityHistory({ ...clientHistoryFilters, range }).catch(() => undefined);
+  }, [isAdmin, range, viewMode]);
 
   const latestClientByService = useMemo(() => {
     const latest = new Map<ServiceKey, ClientSample>();
@@ -471,36 +559,55 @@ export function InfrastructureMonitoringPage() {
   const orderedServices = useMemo(() => {
     if (viewMode === "client") {
       const orderedKeys = new Set(clientInfrastructureOrder);
-      return [
+      return dedupeServicesByKey([
         ...clientInfrastructureOrder.map((key) => clientInfrastructureCurrent.find((item) => item.key === key)).filter((service): service is ServiceHealth => Boolean(service)),
         ...clientInfrastructureCurrent.filter((item) => !orderedKeys.has(item.key))
-      ];
+      ]);
     }
     const defaults = serviceOrder
       .map((key) => activeCurrent.find((item) => item.key === key) || ({ key, serviceName: labelForService(key), status: "unknown", statusLabel: "Unknown", responseTimeMs: null, latencyMs: null, packetLossPercent: null, dnsStatus: null, dnsResponseTimeMs: null, lastCheckedAt: "", availabilityPercent: 0, incidentCount: 0, message: "Waiting for Oracle monitoring data", isDefault: true, supportTeam: defaultSupportFor(key).supportTeam, contactNumber: defaultSupportFor(key).contactNumber, escalationNote: defaultSupportFor(key).escalationNote } as ServiceHealth));
     const custom = activeCurrent.filter((item) => !serviceOrder.includes(item.key));
-    return [...defaults, ...custom];
+    return dedupeServicesByKey([...defaults, ...custom]);
   }, [activeCurrent, clientInfrastructureCurrent, viewMode]);
 
-  const orderedLocalServices = useMemo(() => clientLocalOrder
+  const orderedLocalServices = useMemo(() => dedupeServicesByKey(clientLocalOrder
     .map((key) => clientLocalCurrent.find((item) => item.key === key))
-    .filter((service): service is ServiceHealth => Boolean(service)), [clientLocalCurrent]);
+    .filter((service): service is ServiceHealth => Boolean(service))), [clientLocalCurrent]);
 
-  const displayServices = viewMode === "client" ? [...orderedLocalServices, ...orderedServices] : orderedServices;
-  const dynamicServiceKeys = displayServices.map((service) => service.key);
+  const displayServices = useMemo(() => viewMode === "client" ? [...orderedLocalServices, ...orderedServices] : orderedServices, [orderedLocalServices, orderedServices, viewMode]);
+  const displayServiceKeySignature = useMemo(() => displayServices.map((service) => service.key).join("|"), [displayServices]);
 
-  const historyByService = useMemo(() => Object.fromEntries(dynamicServiceKeys.map((key) => [
-    key,
-    viewMode === "client" ? clientSamples.filter((point) => point.serviceKey === key).map(clientSampleToHistoryPoint) : history.filter((point) => point.serviceKey === key)
-  ])) as Record<ServiceKey, HistoryPoint[]>, [history, clientSamples, viewMode, dynamicServiceKeys.join("|")]);
+  const historyByService = useMemo(() => {
+    const serviceKeys = new Set(displayServices.map((service) => service.key));
+    const grouped = new Map<ServiceKey, HistoryPoint[]>();
+    for (const key of serviceKeys) grouped.set(key, []);
+    if (viewMode === "client") {
+      for (const sample of clientSamples) {
+        if (!serviceKeys.has(sample.serviceKey)) continue;
+        grouped.get(sample.serviceKey)?.push(clientSampleToHistoryPoint(sample));
+      }
+    } else {
+      for (const point of history) {
+        if (!serviceKeys.has(point.serviceKey)) continue;
+        grouped.get(point.serviceKey)?.push(point);
+      }
+    }
+    return Object.fromEntries(grouped) as Record<ServiceKey, HistoryPoint[]>;
+  }, [history, clientSamples, viewMode, displayServiceKeySignature]);
 
-  const activeHeatmap = viewMode === "client" ? buildClientHeatmap(clientInfrastructureServices, clientSamples, range) : heatmap;
-
-  const filteredHeatmap = activeHeatmap.filter((point) => {
-    if (serviceFilter !== "all" && point.serviceKey !== serviceFilter) return false;
-    if (statusFilter !== "all" && point.status !== statusFilter) return false;
-    return true;
-  });
+  const activeHeatmap = useMemo(() => viewMode === "client"
+    ? buildClientHeatmap(clientInfrastructureServices, clientSamples, range)
+    : Array.isArray(heatmap) ? heatmap : [], [clientInfrastructureServices, clientSamples, heatmap, range, viewMode]);
+  const debouncedServiceFilter = useDebouncedValue(serviceFilter, 250);
+  const debouncedStatusFilter = useDebouncedValue(statusFilter, 250);
+  const handleViewModeChange = useCallback((value: ViewMode) => setViewMode(value), []);
+  const handleRangeChange = useCallback((value: RangeKey) => setRange(value), []);
+  const handleServiceFilterChange = useCallback((value: ServiceKey | "all") => setServiceFilter(value), []);
+  const handleStatusFilterChange = useCallback((value: StatusFilter) => setStatusFilter(value), []);
+  const handleClientFilters = useCallback((filters: ClientHistoryFilters) => setClientHistoryFilters(filters), []);
+  const handleApplyClientFilters = useCallback(() => {
+    void loadClientConnectivityHistory({ ...clientHistoryFilters, range });
+  }, [clientHistoryFilters, range]);
 
   return (
     <div className="space-y-5">
@@ -512,8 +619,8 @@ export function InfrastructureMonitoringPage() {
             <p className="mt-1 text-sm text-slate-400">{viewMode === "server" ? "Server View: checked from backend server and recorded in Oracle official monitoring history." : "Client View: checked from this computer/browser and recorded in CLIENT_CONNECTIVITY_HISTORY."}</p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <ViewModeSelector value={viewMode} onChange={setViewMode} />
-            <RangeSelector value={range} onChange={setRange} />
+            <ViewModeSelector value={viewMode} onChange={handleViewModeChange} />
+            <RangeSelector value={range} onChange={handleRangeChange} />
           </div>
         </div>
         {error ? <p className="mt-4 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">{error}</p> : null}
@@ -540,7 +647,7 @@ export function InfrastructureMonitoringPage() {
             <div className="grid gap-4 xl:grid-cols-3">
               {agentVerifiedServices.map((service) => (
                 <ServiceDashboard
-                  key={service.key}
+                  key={`agent-service-${service.key}`}
                   serviceKey={service.key}
                   service={service}
                   history={agentHistoryByService[service.key] || []}
@@ -565,7 +672,7 @@ export function InfrastructureMonitoringPage() {
           <div className="grid gap-4 xl:grid-cols-3">
             {orderedLocalServices.map((service) => (
               <ServiceDashboard
-                key={service.key}
+                key={`local-service-${service.key}`}
                 serviceKey={service.key}
                 service={service}
                 history={historyByService[service.key] || []}
@@ -584,7 +691,7 @@ export function InfrastructureMonitoringPage() {
         <div className="grid gap-4 xl:grid-cols-3">
           {orderedServices.map((service) => (
             <ServiceDashboard
-              key={service.key}
+              key={`service-card-${service.key}`}
               serviceKey={service.key}
               service={service}
               history={historyByService[service.key] || []}
@@ -598,14 +705,14 @@ export function InfrastructureMonitoringPage() {
       </section>
 
       <HeatmapSection
-        points={filteredHeatmap}
+        points={activeHeatmap}
         range={range}
-        serviceFilter={serviceFilter}
-        statusFilter={statusFilter}
+        serviceFilter={debouncedServiceFilter}
+        statusFilter={debouncedStatusFilter}
         services={orderedServices}
         sourceLabel={viewMode === "client" ? "current browser session samples from this computer" : "Oracle monitoring history"}
-        onServiceFilter={setServiceFilter}
-        onStatusFilter={setStatusFilter}
+        onServiceFilter={handleServiceFilterChange}
+        onStatusFilter={handleStatusFilterChange}
       />
 
       {viewMode === "server" ? <div className="grid gap-5 xl:grid-cols-[1fr_1.25fr]">
@@ -619,8 +726,8 @@ export function InfrastructureMonitoringPage() {
         <ClientConnectivityHistory
           rows={clientHistoryRows}
           filters={clientHistoryFilters}
-          onFilters={setClientHistoryFilters}
-          onApply={() => loadClientConnectivityHistory()}
+          onFilters={handleClientFilters}
+          onApply={handleApplyClientFilters}
         />
         </>
       ) : null}
@@ -704,20 +811,26 @@ function EnterpriseClientSummary({ summary }: { summary: ClientConnectivitySumma
   );
 }
 
-function ServiceDashboard({ serviceKey, service, history, range, loading, checkedFrom = "Backend Server", viewMode = "server" }: { serviceKey: ServiceKey; service?: ServiceHealth; history: HistoryPoint[]; range: RangeKey; loading: boolean; checkedFrom?: string; viewMode?: ViewMode }) {
+const ServiceDashboard = memo(function ServiceDashboard({ serviceKey, service, history, range, loading, checkedFrom = "Backend Server", viewMode = "server" }: { serviceKey: ServiceKey; service?: ServiceHealth; history: HistoryPoint[]; range: RangeKey; loading: boolean; checkedFrom?: string; viewMode?: ViewMode }) {
   const key = service?.key || serviceKey;
   const Icon = icons[key] || Globe2;
   const agentVerified = service?.source === "OPSCENTER_AGENT";
-  const rawChartData = history.map((point) => ({
-    label: new Date(point.checkedAt).toLocaleDateString([], viewMode === "client" || range === "24h" ? { hour: "2-digit", minute: "2-digit" } : { month: "short", day: "numeric" }),
-    checkedAt: point.checkedAt,
-    value: viewMode === "client" && !agentVerified ? point.responseTimeMs ?? 0 : point.responseTimeMs,
-    markerValue: null as number | null,
-    status: point.status,
-    responseTimeMs: point.responseTimeMs,
-    serviceName: point.serviceName,
-    hostname: point.hostname || service?.hostname || ""
-  }));
+  const rawChartData = (Array.isArray(history) ? history : [])
+    .map((point) => {
+      const checkedAt = validDateIso(point.checkedAt);
+      if (!checkedAt) return null;
+      return {
+        label: formatChartDate(checkedAt, viewMode, range),
+        checkedAt,
+        value: viewMode === "client" && !agentVerified ? point.responseTimeMs ?? 0 : point.responseTimeMs,
+        markerValue: null as number | null,
+        status: point.status,
+        responseTimeMs: point.responseTimeMs,
+        serviceName: point.serviceName,
+        hostname: point.hostname || service?.hostname || ""
+      };
+    })
+    .filter((point): point is NonNullable<typeof point> => Boolean(point));
   const chartData = viewMode === "client" && !agentVerified ? rawChartData : withIncidentMarkers(rawChartData);
   const isClientCannotVerify = viewMode === "client" && !agentVerified && service?.status === "unknown";
   const sourceLabel = service?.sourceLabel || (viewMode === "client" ? "Browser Check" : "Backend Verified");
@@ -785,7 +898,7 @@ function ServiceDashboard({ serviceKey, service, history, range, loading, checke
       </div>
     </article>
   );
-}
+});
 
 function SourceBadge({ label }: { label: string }) {
   const classes = label === "Agent Verified"
@@ -796,11 +909,11 @@ function SourceBadge({ label }: { label: string }) {
   return <span className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${classes}`}>{label}</span>;
 }
 
-function HistoryChart({ data, collecting = false, viewMode = "server", agentVerified = false }: { data: Array<{ label: string; checkedAt: string; value: number | null; markerValue: number | null; status: string; responseTimeMs: number | null; serviceName?: string; hostname?: string }>; collecting?: boolean; viewMode?: ViewMode; agentVerified?: boolean }) {
+const HistoryChart = memo(function HistoryChart({ data, collecting = false, viewMode = "server", agentVerified = false }: { data: Array<{ label: string; checkedAt: string; value: number | null; markerValue: number | null; status: string; responseTimeMs: number | null; serviceName?: string; hostname?: string }>; collecting?: boolean; viewMode?: ViewMode; agentVerified?: boolean }) {
   return (
-    <div className="relative h-full">
+    <div className="relative h-full min-h-0 min-w-0">
       {collecting ? <p className="absolute right-2 top-2 z-10 rounded-md border border-slate-700 bg-slate-950/90 px-2 py-1 text-xs font-semibold text-slate-300">Collecting more samples...</p> : null}
-      <ResponsiveContainer width="100%" height="100%">
+      <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={1} initialDimension={{ width: 320, height: 208 }}>
         <LineChart data={data}>
           <CartesianGrid stroke="#1e293b" strokeDasharray="3 3" />
           <XAxis dataKey="label" tick={{ fill: "#94a3b8", fontSize: 10 }} axisLine={false} tickLine={false} />
@@ -826,7 +939,7 @@ function HistoryChart({ data, collecting = false, viewMode = "server", agentVeri
       </ResponsiveContainer>
     </div>
   );
-}
+});
 
 function AgentHistoryTooltip({ active, payload }: any) {
   const point = payload?.[0]?.payload;
@@ -855,7 +968,7 @@ function HistoryTooltip({ active, payload }: any) {
   );
 }
 
-function HeatmapSection({ points, range, serviceFilter, statusFilter, services, sourceLabel, onServiceFilter, onStatusFilter }: {
+const HeatmapSection = memo(function HeatmapSection({ points, range, serviceFilter, statusFilter, services, sourceLabel, onServiceFilter, onStatusFilter }: {
   points: HeatmapPoint[];
   range: RangeKey;
   serviceFilter: ServiceKey | "all";
@@ -866,17 +979,35 @@ function HeatmapSection({ points, range, serviceFilter, statusFilter, services, 
   onStatusFilter: (value: StatusFilter) => void;
 }) {
   const serverHeatmap = sourceLabel === "Oracle monitoring history";
-  const grouped = services.map((service) => ({
+  const safeServices = useMemo(() => dedupeServicesByKey(Array.isArray(services) ? services : []), [services]);
+  const aggregatedPoints = useMemo(() => aggregateHeatmapPoints(Array.isArray(points) ? points : [], safeServices, range), [points, range, safeServices]);
+  const buckets = useMemo(() => buildClientRangeBuckets(range), [range]);
+  const grouped = useMemo(() => safeServices.map((service) => ({
     key: service.key,
     name: service.serviceName,
     disabled: service.status === "disabled",
-    points: service.status === "disabled" ? [] : points.filter((point) => point.serviceKey === service.key)
-  })).filter((item) => serviceFilter === "all" || item.key === serviceFilter).filter((item) => statusFilter !== "disabled" || item.disabled);
+    points: service.status === "disabled" ? [] : aggregatedPoints.filter((point) => point.serviceKey === service.key)
+  })).filter((item) => serviceFilter === "all" || item.key === serviceFilter).filter((item) => statusFilter !== "disabled" || item.disabled),
+  [aggregatedPoints, safeServices, serviceFilter, statusFilter]);
 
-  const visibleGrouped = statusFilter === "disabled" ? grouped : grouped.map((service) => ({
+  const visibleGrouped = useMemo(() => statusFilter === "disabled" ? grouped : grouped.map((service) => ({
     ...service,
-    points: statusFilter === "all" ? service.points : service.points.filter((point) => point.status === statusFilter)
-  }));
+    points: statusFilter === "all" ? service.points : service.points.map((point) => point.status === statusFilter ? point : {
+      ...point,
+      status: "no_data" as const,
+      totalChecks: 0,
+      healthyChecks: 0,
+      degradedChecks: 0,
+      criticalChecks: 0,
+      cannotVerifyChecks: 0,
+      incidentCount: 0,
+      checkedAt: null,
+      responseTimeMs: null,
+      maxResponseTimeMs: null,
+      noDataMessage: `No ${heatStatusLabel(statusFilter as HeatmapPoint["status"])} data in this bucket`
+    })
+  })), [grouped, statusFilter]);
+  const blockCount = heatmapBlockCount(range);
 
   return (
     <section className="rounded-lg border border-slate-800 bg-slate-950 p-5">
@@ -888,7 +1019,7 @@ function HeatmapSection({ points, range, serviceFilter, statusFilter, services, 
         <div className="flex flex-wrap gap-2">
           <select value={serviceFilter} onChange={(event) => onServiceFilter(event.target.value as ServiceKey | "all")} className="rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100">
             <option value="all">All services</option>
-            {services.map((service) => <option key={service.key} value={service.key}>{service.serviceName}</option>)}
+            {safeServices.map((service) => <option key={`heatmap-filter-${service.key}`} value={service.key}>{service.serviceName}</option>)}
           </select>
           <select value={statusFilter} onChange={(event) => onStatusFilter(event.target.value as StatusFilter)} className="rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100">
             <option value="all">All statuses</option>
@@ -909,15 +1040,13 @@ function HeatmapSection({ points, range, serviceFilter, statusFilter, services, 
       </div>
       <div className="mt-5 space-y-4">
         {visibleGrouped.map((service) => (
-          <div key={service.key}>
+          <div key={`heatmap-row-${service.key}`}>
             <p className="mb-2 text-sm font-semibold text-slate-200">{service.name}</p>
-            <div className="grid w-fit gap-[10px]" style={{ gridTemplateColumns: `repeat(${range === "24h" ? 24 : range === "7d" ? 7 : 30}, 12px)` }}>
-              {service.disabled ? Array.from({ length: range === "24h" ? 24 : range === "7d" ? 7 : 30 }).map((_, index) => (
-                <div key={index} className="h-[24px] rounded-[5px] bg-slate-600" title="Monitoring Disabled" />
-              )) : service.points.length ? service.points.map((point) => (
-                <div key={`${point.serviceKey}-${point.bucket}`} title={heatTooltip(point, serverHeatmap)} className={`h-[24px] rounded-[5px] ${heatClass(point.status)}`} />
-              )) : Array.from({ length: range === "24h" ? 24 : range === "7d" ? 7 : 30 }).map((_, index) => (
-                <div key={index} className="h-[24px] rounded-[5px] bg-slate-700" title={`Service: ${service.name}\nStatus: No data\nChecked time: No record\nResponse time: N/A\nNo monitoring data available`} />
+            <div className="grid w-fit gap-[10px]" style={{ gridTemplateColumns: `repeat(${blockCount}, 12px)` }}>
+              {service.disabled ? buckets.map((bucket) => (
+                <div key={`${service.key}-disabled-${bucket.start.toISOString()}`} className="h-[24px] rounded-[5px] bg-slate-600" title="Monitoring Disabled" />
+              )) : service.points.map((point) => (
+                <div key={`${point.serviceKey}-${range}-${point.bucketStartAt}`} title={heatTooltip(point, serverHeatmap)} className={`h-[24px] rounded-[5px] ${heatClass(point.status)}`} />
               ))}
             </div>
           </div>
@@ -925,6 +1054,158 @@ function HeatmapSection({ points, range, serviceFilter, statusFilter, services, 
       </div>
     </section>
   );
+});
+
+const heatStatusPriority: Record<HeatmapPoint["status"], number> = {
+  no_data: 0,
+  healthy: 1,
+  degraded: 2,
+  cannot_verify: 3,
+  critical: 4
+};
+
+function normalizeHeatStatus(status: unknown): HeatmapPoint["status"] {
+  const normalized = String(status || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (normalized === "healthy" || normalized === "online") return "healthy";
+  if (normalized === "slow" || normalized === "degraded") return "degraded";
+  if (normalized === "offline" || normalized === "down" || normalized === "critical") return "critical";
+  if (normalized === "unknown" || normalized === "cannot_verify") return "cannot_verify";
+  return "no_data";
+}
+
+function aggregateHeatmapPoints(points: HeatmapPoint[], services: ServiceHealth[], range: RangeKey) {
+  const buckets = buildClientRangeBuckets(range);
+  const serviceKeys = new Set(services.map((service) => service.key));
+  const byBucket = new Map<string, HeatmapPoint>();
+  const duplicateCounts = new Map<string, number>();
+
+  for (const rawPoint of points) {
+    if (!rawPoint || !serviceKeys.has(rawPoint.serviceKey)) continue;
+    const bucketStart = heatmapPointBucketStart(rawPoint, range);
+    if (!bucketStart) continue;
+    const bucket = buckets.find((candidate) => bucketStart >= candidate.start.getTime() && bucketStart < candidate.end.getTime());
+    if (!bucket) continue;
+
+    const key = `${rawPoint.serviceKey}|${bucket.start.toISOString()}`;
+    const point = normalizeHeatmapPoint(rawPoint, bucket);
+    const existing = byBucket.get(key);
+    if (!existing) {
+      byBucket.set(key, point);
+      continue;
+    }
+    duplicateCounts.set(key, (duplicateCounts.get(key) || 1) + 1);
+    byBucket.set(key, mergeHeatmapPoints(existing, point));
+  }
+
+  if (process.env.NODE_ENV === "development" && duplicateCounts.size) {
+    console.warn("[Infrastructure Heat Map] Duplicate service/time buckets merged.", Object.fromEntries(duplicateCounts));
+  }
+
+  return services.flatMap((service) => buckets.map((bucket) => byBucket.get(`${service.key}|${bucket.start.toISOString()}`) || emptyHeatmapPoint(service, bucket)));
+}
+
+function normalizeHeatmapPoint(point: HeatmapPoint, bucket: { start: Date; end: Date; label: string }): HeatmapPoint {
+  const status = normalizeHeatStatus(point.status);
+  return {
+    ...point,
+    serviceName: point.serviceName || point.serviceKey,
+    bucket: bucket.label,
+    bucketStartAt: bucket.start.toISOString(),
+    bucketEndAt: bucket.end.toISOString(),
+    status,
+    totalChecks: safeCount(point.totalChecks),
+    healthyChecks: safeCount(point.healthyChecks),
+    degradedChecks: safeCount(point.degradedChecks),
+    criticalChecks: safeCount(point.criticalChecks),
+    cannotVerifyChecks: safeCount(point.cannotVerifyChecks),
+    availableChecks: safeCount(point.availableChecks),
+    incidentCount: safeCount(point.incidentCount ?? (safeCount(point.degradedChecks) + safeCount(point.criticalChecks) + safeCount(point.cannotVerifyChecks))),
+    checkedAt: validDateIso(point.checkedAt),
+    responseTimeMs: safeNumber(point.responseTimeMs),
+    maxResponseTimeMs: safeNumber(point.maxResponseTimeMs),
+    noDataMessage: point.noDataMessage || null
+  };
+}
+
+function mergeHeatmapPoints(left: HeatmapPoint, right: HeatmapPoint): HeatmapPoint {
+  const totalChecks = left.totalChecks + right.totalChecks;
+  const responseTotal = (left.responseTimeMs || 0) * left.totalChecks + (right.responseTimeMs || 0) * right.totalChecks;
+  const responseCount = (left.responseTimeMs === null ? 0 : left.totalChecks) + (right.responseTimeMs === null ? 0 : right.totalChecks);
+  const checkedAt = latestValidDate(left.checkedAt, right.checkedAt);
+  return {
+    ...left,
+    serviceName: left.serviceName || right.serviceName,
+    status: heatStatusPriority[right.status] > heatStatusPriority[left.status] ? right.status : left.status,
+    totalChecks,
+    healthyChecks: left.healthyChecks + right.healthyChecks,
+    degradedChecks: left.degradedChecks + right.degradedChecks,
+    criticalChecks: left.criticalChecks + right.criticalChecks,
+    cannotVerifyChecks: safeCount(left.cannotVerifyChecks) + safeCount(right.cannotVerifyChecks),
+    availableChecks: safeCount(left.availableChecks) + safeCount(right.availableChecks),
+    incidentCount: safeCount(left.incidentCount) + safeCount(right.incidentCount),
+    checkedAt,
+    responseTimeMs: responseCount ? Math.round(responseTotal / responseCount) : null,
+    maxResponseTimeMs: maxNullable(left.maxResponseTimeMs, right.maxResponseTimeMs),
+    noDataMessage: totalChecks ? null : left.noDataMessage || right.noDataMessage
+  };
+}
+
+function emptyHeatmapPoint(service: ServiceHealth, bucket: { start: Date; end: Date; label: string }): HeatmapPoint {
+  return {
+    serviceKey: service.key,
+    serviceName: service.serviceName,
+    bucket: bucket.label,
+    bucketStartAt: bucket.start.toISOString(),
+    bucketEndAt: bucket.end.toISOString(),
+    totalChecks: 0,
+    healthyChecks: 0,
+    degradedChecks: 0,
+    criticalChecks: 0,
+    cannotVerifyChecks: 0,
+    availableChecks: 0,
+    incidentCount: 0,
+    status: "no_data",
+    checkedAt: null,
+    responseTimeMs: null,
+    maxResponseTimeMs: null,
+    noDataMessage: "No monitoring data available"
+  };
+}
+
+function heatmapPointBucketStart(point: HeatmapPoint, range: RangeKey) {
+  for (const value of [point.bucketStartAt, point.bucket, point.checkedAt]) {
+    const timestamp = safeDateTime(value);
+    if (timestamp === null) continue;
+    const date = new Date(timestamp);
+    if (range === "24h") date.setMinutes(0, 0, 0);
+    else date.setHours(0, 0, 0, 0);
+    return date.getTime();
+  }
+  return null;
+}
+
+function heatmapBlockCount(range: RangeKey) {
+  return range === "24h" ? 24 : range === "7d" ? 7 : 30;
+}
+
+function safeCount(value: unknown) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.round(number) : 0;
+}
+
+function safeNumber(value: unknown) {
+  const number = Number(value);
+  return value !== null && value !== undefined && Number.isFinite(number) ? number : null;
+}
+
+function maxNullable(left?: number | null, right?: number | null) {
+  const values = [safeNumber(left), safeNumber(right)].filter((value): value is number => value !== null);
+  return values.length ? Math.max(...values) : null;
+}
+
+function latestValidDate(left?: string | null, right?: string | null) {
+  const values = [validDateIso(left), validDateIso(right)].filter((value): value is string => Boolean(value));
+  return values.sort((a, b) => safeDateTime(b)! - safeDateTime(a)!)[0] || null;
 }
 
 function LegendSwatch({ className, label }: { className: string; label: string }) {
@@ -949,8 +1230,8 @@ function AgentVerifiedClients({ rows }: { rows: ClientConnectivityHistoryRow[] }
       <h2 className="text-lg font-semibold text-white">Agent Verified Client Services</h2>
       <p className="mt-1 text-sm text-slate-400">Confirmed connectivity measurements reported by OpsCenter Agent.</p>
       <div className="mt-4 grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
-        {services.map(({ latest: row, availability }) => (
-          <article key={`${row.id}-${row.serviceName}`} className="rounded-md border border-slate-800 bg-slate-900 p-4">
+        {services.map(({ latest: row, availability }, index) => (
+          <article key={`agent-client-${row.clientId || row.hostname || row.username}-${row.serviceName}-${row.checkedAt || row.id}-${index}`} className="rounded-md border border-slate-800 bg-slate-900 p-4">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="font-semibold text-white">{row.serviceName}</p>
@@ -1043,8 +1324,8 @@ function ClientConnectivityHistory({ rows, filters, onFilters, onApply }: {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-800 text-slate-300">
-            {rows.map((row) => (
-              <tr key={row.id}>
+            {rows.map((row, index) => (
+              <tr key={`client-history-${row.id}-${row.clientId || row.hostname || row.username}-${row.serviceName}-${row.checkedAt}-${index}`}>
                 <td className="py-3 pr-4 font-semibold text-white">{row.username}</td>
                 <td className="py-3 pr-4">{row.userRole}</td>
                 <td className="py-3 pr-4">{row.serviceName}</td>
@@ -1161,6 +1442,15 @@ function buildClientServices(configuredServices: InfrastructureServiceConfig[], 
     ...clientBaseOrder.map((key) => byKey.get(key)).filter((service): service is ClientServiceDefinition => Boolean(service)),
     ...Array.from(byKey.values()).filter((service) => !clientBaseOrder.includes(service.key))
   ];
+}
+
+function dedupeServicesByKey<T extends { key: ServiceKey; serviceName?: string }>(services: T[]) {
+  const byKey = new Map<ServiceKey, T>();
+  for (const service of Array.isArray(services) ? services : []) {
+    if (!service?.key) continue;
+    if (!byKey.has(service.key)) byKey.set(service.key, service);
+  }
+  return Array.from(byKey.values());
 }
 
 function knownClientServiceKey(name: string): ServiceKey | "" {
@@ -1315,10 +1605,10 @@ function mergeClientSamples(existing: ClientSample[], incoming: ClientSample[], 
   const cutoff = clientRangeCutoff(range);
   const byId = new Map<string, ClientSample>();
   for (const sample of [...existing, ...incoming]) {
-    const checkedAt = new Date(sample.checkedAt).getTime();
-    if (Number.isFinite(checkedAt) && checkedAt >= cutoff) byId.set(sample.id, sample);
+    const checkedAt = safeDateTime(sample.checkedAt);
+    if (checkedAt !== null && checkedAt >= cutoff) byId.set(sample.id, sample);
   }
-  return Array.from(byId.values()).sort((left, right) => new Date(left.checkedAt).getTime() - new Date(right.checkedAt).getTime());
+  return Array.from(byId.values()).sort((left, right) => (safeDateTime(left.checkedAt) || 0) - (safeDateTime(right.checkedAt) || 0));
 }
 
 function clientHistoryRowsToSamples(rows: ClientConnectivityHistoryRow[], services: ClientServiceDefinition[]) {
@@ -1351,7 +1641,7 @@ function clientHistoryRowsToSamples(rows: ClientConnectivityHistoryRow[], servic
       dnsStatus: row.dnsStatus,
       errorReason: row.errorReason
     } satisfies ClientSample;
-  }).sort((left, right) => new Date(left.checkedAt).getTime() - new Date(right.checkedAt).getTime());
+  }).sort((left, right) => (safeDateTime(left.checkedAt) || 0) - (safeDateTime(right.checkedAt) || 0));
 }
 
 function clientRangeCutoff(range: RangeKey) {
@@ -1394,7 +1684,7 @@ function buildAgentVerifiedServices(rows: ClientAgentServiceHistoryRow[]): Servi
   const latestByService = new Map<ServiceKey, ClientAgentServiceHistoryRow>();
   for (const row of rows) {
     const existing = latestByService.get(row.serviceKey);
-    if (!existing || new Date(row.checkedAt).getTime() > new Date(existing.checkedAt).getTime()) latestByService.set(row.serviceKey, row);
+    if (!existing || (safeDateTime(row.checkedAt) || 0) > (safeDateTime(existing.checkedAt) || 0)) latestByService.set(row.serviceKey, row);
   }
   return Array.from(latestByService.values()).map((latest) => {
     const serviceRows = rows.filter((row) => row.serviceKey === latest.serviceKey);
@@ -1459,7 +1749,7 @@ function agentStatusLabel(status: ClientAgentServiceHistoryRow["status"]) {
 
 function buildClientHeatmap(services: ClientServiceDefinition[], samples: ClientSample[], range: RangeKey): HeatmapPoint[] {
   const buckets = buildClientRangeBuckets(range);
-  return services.flatMap((service) => buckets.map((bucket) => {
+  return dedupeServicesByKey(services).flatMap((service) => buckets.map((bucket) => {
     const bucketSamples = samples.filter((sample) => sample.serviceKey === service.key && sampleInBucket(sample, bucket.start, bucket.end));
     if (!bucketSamples.length) {
       return {
@@ -1476,7 +1766,7 @@ function buildClientHeatmap(services: ClientServiceDefinition[], samples: Client
         noDataMessage: "No client-side monitoring data available"
       };
     }
-    const latest = bucketSamples.reduce((current, sample) => new Date(sample.checkedAt).getTime() > new Date(current.checkedAt).getTime() ? sample : current, bucketSamples[0]);
+    const latest = bucketSamples.reduce((current, sample) => (safeDateTime(sample.checkedAt) || 0) > (safeDateTime(current.checkedAt) || 0) ? sample : current, bucketSamples[0]);
     const status = summarizeClientHeatStatus(bucketSamples);
     const responseTimes = bucketSamples.map((sample) => sample.responseTimeMs).filter((value): value is number => value !== null && value !== undefined);
     return {
@@ -1537,7 +1827,8 @@ function buildClientRangeBuckets(range: RangeKey) {
 }
 
 function sampleInBucket(sample: ClientSample, start: Date, end: Date) {
-  const checkedAt = new Date(sample.checkedAt).getTime();
+  const checkedAt = safeDateTime(sample.checkedAt);
+  if (checkedAt === null) return false;
   return Number.isFinite(checkedAt) && checkedAt >= start.getTime() && checkedAt < end.getTime();
 }
 
@@ -1557,13 +1848,13 @@ function isBrowserTimeoutError(error: unknown) {
   return namedError.name === "AbortError" || namedError.name === "CanceledError" || namedError.code === "ERR_CANCELED";
 }
 
-function IncidentTimeline({ incidents }: { incidents: Incident[] }) {
+const IncidentTimeline = memo(function IncidentTimeline({ incidents }: { incidents: Incident[] }) {
   return (
     <section className="rounded-lg border border-slate-800 bg-slate-950 p-5">
       <h2 className="text-lg font-semibold text-white">Incident Timeline</h2>
       <div className="mt-4 max-h-96 space-y-3 overflow-auto">
-        {incidents.map((incident) => (
-          <div key={incident.id} className="rounded-md border border-slate-800 bg-slate-900/70 p-3">
+        {incidents.map((incident, index) => (
+          <div key={`incident-${incident.id}-${incident.serviceKey}-${incident.checkedAt}-${index}`} className="rounded-md border border-slate-800 bg-slate-900/70 p-3">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="font-semibold text-slate-100">{incident.type}</p>
@@ -1580,10 +1871,10 @@ function IncidentTimeline({ incidents }: { incidents: Incident[] }) {
       </div>
     </section>
   );
-}
+});
 
-function AvailabilityReports({ reports, services }: { reports: ReportRow[]; services: ServiceHealth[] }) {
-  const rows = services.map((service) => {
+const AvailabilityReports = memo(function AvailabilityReports({ reports, services }: { reports: ReportRow[]; services: ServiceHealth[] }) {
+  const rows = useMemo(() => services.map((service) => {
     const report = reports.find((row) => row.serviceKey === service.key);
     return {
       serviceKey: service.key,
@@ -1597,9 +1888,9 @@ function AvailabilityReports({ reports, services }: { reports: ReportRow[]; serv
       supportTeam: report?.supportTeam || service.supportTeam || "",
       contactNumber: report?.contactNumber || service.contactNumber || ""
     };
-  });
+  }), [reports, services]);
 
-  function exportCsv() {
+  const exportCsv = useCallback(() => {
     const header = "Service,Support Team,Contact Number,Availability %,Average Response ms,Total Downtime Minutes,Incident Count,Checks";
     const csvRows = rows.map((row) => [
       row.serviceName,
@@ -1618,11 +1909,11 @@ function AvailabilityReports({ reports, services }: { reports: ReportRow[]; serv
     link.download = "infrastructure-availability.csv";
     link.click();
     URL.revokeObjectURL(url);
-  }
+  }, [rows]);
 
-  function exportPdf() {
+  const exportPdf = useCallback(() => {
     window.print();
-  }
+  }, []);
 
   return (
     <section className="rounded-lg border border-slate-800 bg-slate-950 p-5">
@@ -1647,8 +1938,8 @@ function AvailabilityReports({ reports, services }: { reports: ReportRow[]; serv
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-800 text-slate-300">
-            {rows.map((row) => (
-              <tr key={row.serviceKey}>
+            {rows.map((row, index) => (
+              <tr key={`availability-${row.serviceKey}-${index}`}>
                 <td className="py-3 pr-4 font-semibold text-white">{row.serviceName}</td>
                 <td className="py-3 pr-4">{row.supportTeam || "Not configured"}</td>
                 <td className="py-3 pr-4">{row.contactNumber || "Not configured"}</td>
@@ -1663,7 +1954,7 @@ function AvailabilityReports({ reports, services }: { reports: ReportRow[]; serv
       </div>
     </section>
   );
-}
+});
 
 function Metric({ label, value }: { label: string; value: string }) {
   return <div className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2"><p className="text-[11px] uppercase tracking-wide text-slate-500">{label}</p><p className="mt-1 truncate text-sm font-semibold text-slate-100">{value}</p></div>;
@@ -1778,16 +2069,27 @@ function heatTooltip(point: HeatmapPoint, backendVerified = false) {
   }
   const lines = [
     `Service: ${point.serviceName}`,
+    `Time range: ${formatTimeRange(point.bucketStartAt, point.bucketEndAt, point.bucket)}`,
     `Status: ${heatStatusLabel(point.status)}`,
+    `Total checks: ${point.totalChecks}`,
+    `Average response time: ${formatMs(point.responseTimeMs)}`,
+    `Incident count: ${point.incidentCount ?? point.degradedChecks + point.criticalChecks + (point.cannotVerifyChecks || 0)}`,
     `Checked time: ${point.checkedAt ? formatDate(point.checkedAt) : "No record"}`,
-    `Response time: ${formatMs(point.responseTimeMs)}`
+    "Checked From: Browser Check"
   ];
   if (point.status === "no_data") lines.push(point.noDataMessage || "No monitoring data available");
   return lines.join("\n");
 }
 
 function formatTimeRange(start?: string | null, end?: string | null, fallback?: string) {
-  if (start && end) return `${formatHour(start)} - ${formatHour(end)}`;
+  const startTime = safeDateTime(start);
+  const endTime = safeDateTime(end);
+  if (startTime !== null && endTime !== null) {
+    if (endTime - startTime >= 24 * 60 * 60 * 1000) {
+      return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(new Date(startTime));
+    }
+    return `${formatHour(new Date(startTime))} - ${formatHour(new Date(endTime))}`;
+  }
   if (!fallback) return "N/A";
   const bucketStart = new Date(fallback.replace(" ", "T"));
   if (Number.isNaN(bucketStart.getTime())) return fallback;
@@ -1835,6 +2137,29 @@ function formatBrowserAvailability(service?: ServiceHealth) {
 }
 
 function formatDate(value?: string | null) {
-  if (!value) return "N/A";
-  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value));
+  const timestamp = safeDateTime(value);
+  if (timestamp === null) return "N/A";
+  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(timestamp));
+}
+
+function formatChartDate(value: string, viewMode: ViewMode, range: RangeKey) {
+  const timestamp = safeDateTime(value);
+  if (timestamp === null) return "N/A";
+  return new Date(timestamp).toLocaleDateString([], viewMode === "client" || range === "24h" ? { hour: "2-digit", minute: "2-digit" } : { month: "short", day: "numeric" });
+}
+
+function safeDateTime(value?: string | null) {
+  if (!value) return null;
+  const heatmapHourKey = value.match(/^(\d{4})-(\d{2})-(\d{2})-(\d{2})$/);
+  if (heatmapHourKey) {
+    const [, year, month, day, hour] = heatmapHourKey;
+    return new Date(Number(year), Number(month) - 1, Number(day), Number(hour), 0, 0, 0).getTime();
+  }
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function validDateIso(value?: string | null) {
+  const timestamp = safeDateTime(value);
+  return timestamp === null ? null : new Date(timestamp).toISOString();
 }

@@ -233,7 +233,7 @@ function TicketTrendChart({ data, range, onRangeChange }: { data: TicketTrendRow
       </div>
       <div className="mt-4 h-72">
         {data.length ? (
-          <ResponsiveContainer width="100%" height="100%">
+          <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 640, height: 288 }}>
             <LineChart data={data}>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis dataKey="label" />
@@ -256,7 +256,7 @@ function ReportChart({ title, data, type }: { title: string; data: Array<{ label
       <h2 className="text-base font-semibold text-slate-950">{title}</h2>
       <div className="mt-4 h-72">
         {data.length ? (
-          <ResponsiveContainer width="100%" height="100%">
+          <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 640, height: 288 }}>
             {type === "bar" ? (
               <BarChart data={data}>
                 <CartesianGrid strokeDasharray="3 3" />

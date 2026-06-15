@@ -101,7 +101,12 @@ async function main() {
         command: `npm run dev --workspace @opscenter/frontend -- -p ${frontendPort}`,
         name: "frontend",
         prefixColor: "cyan",
-        env: { PORT: String(frontendPort), NEXT_PUBLIC_API_URL: apiUrl, NODE_OPTIONS: "--max-old-space-size=4096" }
+        env: {
+          PORT: String(frontendPort),
+          NEXT_PUBLIC_API_URL: apiUrl,
+          NEXT_PUBLIC_APP_URL: frontendUrl,
+          NODE_OPTIONS: "--max-old-space-size=4096"
+        }
       }
     ],
     {

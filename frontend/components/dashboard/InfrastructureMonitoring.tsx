@@ -226,7 +226,7 @@ function MonitoringPanel({ serviceKey, service, history, loading }: { serviceKey
 
       <div className="mt-4 h-32">
         {chartData.length ? (
-          <ResponsiveContainer width="100%" height="100%">
+          <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 320, height: 128 }}>
             <LineChart data={chartData}>
               <CartesianGrid stroke="#1e293b" strokeDasharray="3 3" />
               <XAxis dataKey="label" tick={{ fill: "#94a3b8", fontSize: 10 }} axisLine={false} tickLine={false} />

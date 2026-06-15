@@ -193,8 +193,8 @@ function bucketLabel(date: Date, range: RangeKey) {
   const month = padDatePart(date.getMonth() + 1);
   const day = padDatePart(date.getDate());
   if (range === "24h") return `${year}-${month}-${day} ${padDatePart(date.getHours())}:${padDatePart(date.getMinutes())}`;
-  if (range === "7d") return `${year}-${month}-${day} ${padDatePart(date.getHours())}:00`;
-  if (range === "30d") return `${year}-${month}-${day} ${padDatePart(date.getHours())}:00`;
+  if (range === "7d") return `${year}-${month}-${day}`;
+  if (range === "30d") return `${year}-${month}-${day}`;
   return `${year}-${month}-${day}`;
 }
 
@@ -221,12 +221,25 @@ function buildRangeBuckets(range: RangeKey) {
 function heatmapBucketFor(value: unknown, range: RangeKey) {
   const date = value instanceof Date ? value : new Date(String(value));
   if (Number.isNaN(date.getTime())) return "unknown";
+  return heatmapBucketKey(date, range);
+}
+
+function heatmapBucketKey(date: Date, range: RangeKey) {
   const year = date.getFullYear();
   const month = padDatePart(date.getMonth() + 1);
   const day = padDatePart(date.getDate());
   const hour = padDatePart(date.getHours());
-  if (range === "24h") return `${year}-${month}-${day} ${hour}:00`;
+  if (range === "24h") return `${year}-${month}-${day}-${hour}`;
   return `${year}-${month}-${day}`;
+}
+
+function normalizeHeatmapStatus(status: unknown): HeatmapStatus {
+  const normalized = String(status || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (normalized === "healthy" || normalized === "online") return "healthy";
+  if (normalized === "slow" || normalized === "degraded") return "degraded";
+  if (normalized === "offline" || normalized === "down" || normalized === "critical") return "critical";
+  if (normalized === "unknown" || normalized === "cannot_verify") return "cannot_verify";
+  return "no_data";
 }
 
 function buildHeatmapRangeBuckets(range: RangeKey) {
@@ -242,7 +255,8 @@ function buildHeatmapRangeBuckets(range: RangeKey) {
     if (range === "24h") end.setHours(start.getHours() + 1);
     else end.setDate(start.getDate() + 1);
     return {
-      label: range === "24h" ? bucketLabel(start, "7d") : bucketLabel(start, range),
+      key: heatmapBucketKey(start, range),
+      label: heatmapBucketKey(start, range),
       start: start.toISOString(),
       end: end.toISOString()
     };
@@ -275,6 +289,7 @@ async function ensureServiceHealthHistoryTable(connection: any) {
   const exists = Number(((result.rows || [])[0] as { COUNT?: number })?.COUNT || 0) > 0;
   if (exists) {
     await ensureServiceHealthHistoryColumns(connection);
+    await ensureServiceHealthHistoryIndexes(connection);
     return;
   }
 
@@ -299,8 +314,24 @@ async function ensureServiceHealthHistoryTable(connection: any) {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
     )`
   );
-  await connection.execute(`CREATE INDEX idx_service_health_hist_key_time ON service_health_history(service_key, checked_at)`);
+  await ensureServiceHealthHistoryIndexes(connection);
   await connection.commit();
+}
+
+async function ensureServiceHealthHistoryIndexes(connection: any) {
+  const indexes = [
+    ["IDX_SERVICE_HEALTH_HIST_KEY_TIME", "CREATE INDEX idx_service_health_hist_key_time ON service_health_history(service_key, checked_at)"],
+    ["IDX_SERVICE_HEALTH_HIST_TIME", "CREATE INDEX idx_service_health_hist_time ON service_health_history(checked_at)"]
+  ] as const;
+
+  for (const [indexName, ddl] of indexes) {
+    const result = await connection.execute(
+      `SELECT COUNT(*) AS count FROM user_indexes WHERE index_name = :indexName`,
+      { indexName }
+    );
+    const exists = Number(((result.rows || [])[0] as { COUNT?: number })?.COUNT || 0) > 0;
+    if (!exists) await connection.execute(ddl);
+  }
 }
 
 async function ensureServiceHealthHistoryColumns(connection: any) {
@@ -800,6 +831,7 @@ export async function getInfrastructureHeatmap(inputRange: unknown = "24h") {
        WHERE checked_at >= SYSTIMESTAMP - INTERVAL '${rangeToInterval(range)}' DAY
        ORDER BY service_key, checked_at`
     );
+    const rows = (result.rows || []) as Array<Record<string, any>>;
 
     const buckets = new Map<string, {
       serviceKey: ServiceKey;
@@ -817,10 +849,12 @@ export async function getInfrastructureHeatmap(inputRange: unknown = "24h") {
       latestCheckedAt: string | null;
     }>();
 
-    for (const row of (result.rows || []) as Array<Record<string, any>>) {
+    const normalizedStatusSamples: string[] = [];
+    for (const row of rows) {
       if (!serviceKeys.has(row.SERVICE_KEY)) continue;
       const serviceKey = row.SERVICE_KEY as ServiceKey;
       const bucket = heatmapBucketFor(row.CHECKED_AT, range);
+      if (bucket === "unknown") continue;
       const key = `${serviceKey}:${bucket}`;
       const current = buckets.get(key) || {
         serviceKey,
@@ -837,33 +871,48 @@ export async function getInfrastructureHeatmap(inputRange: unknown = "24h") {
         maxResponseTimeMs: null,
         latestCheckedAt: null
       };
-      const status = String(row.STATUS || "");
+      const status = normalizeHeatmapStatus(row.STATUS);
+      if (normalizedStatusSamples.length < 8) normalizedStatusSamples.push(`${String(row.STATUS || "")}->${status}`);
       const responseTime = row.RESPONSE_TIME_MS;
       current.totalChecks += 1;
-      if (status === "healthy" || status === "online") {
+      if (status === "healthy") {
         current.healthyChecks += 1;
         current.availableChecks += 1;
-      } else if (status === "slow") {
+      } else if (status === "degraded") {
         current.degradedChecks += 1;
         current.availableChecks += 1;
-      } else if (status === "offline") {
+      } else if (status === "critical") {
         current.criticalChecks += 1;
-      } else if (status === "unknown") {
+      } else if (status === "cannot_verify") {
         current.cannotVerifyChecks += 1;
       }
       if (responseTime !== null && responseTime !== undefined) {
         const responseTimeMs = Number(responseTime);
-        current.responseTimeTotal += responseTimeMs;
-        current.responseTimeCount += 1;
-        current.maxResponseTimeMs = current.maxResponseTimeMs === null ? responseTimeMs : Math.max(current.maxResponseTimeMs, responseTimeMs);
+        if (Number.isFinite(responseTimeMs)) {
+          current.responseTimeTotal += responseTimeMs;
+          current.responseTimeCount += 1;
+          current.maxResponseTimeMs = current.maxResponseTimeMs === null ? responseTimeMs : Math.max(current.maxResponseTimeMs, responseTimeMs);
+        }
       }
-      current.latestCheckedAt = row.CHECKED_AT;
+      const currentLatest = current.latestCheckedAt ? new Date(current.latestCheckedAt).getTime() : 0;
+      const rowCheckedAt = new Date(row.CHECKED_AT).getTime();
+      if (Number.isFinite(rowCheckedAt) && rowCheckedAt >= currentLatest) current.latestCheckedAt = row.CHECKED_AT;
       buckets.set(key, current);
     }
 
     const rangeBuckets = buildHeatmapRangeBuckets(range);
+    if (process.env.NODE_ENV === "development") {
+      console.log("[Heatmap Debug] Selected range:", range);
+      console.log("[Heatmap Debug] Number of SERVICE_HEALTH_HISTORY rows returned:", rows.length);
+      console.log("[Heatmap Debug] Number of buckets generated:", rangeBuckets.length);
+      console.log("[Heatmap Debug] Sample checked_at values:", rows.slice(0, 8).map((row) => row.CHECKED_AT));
+      console.log("[Heatmap Debug] Sample generated bucket keys:", rangeBuckets.slice(0, 8).map((bucket) => bucket.key));
+      console.log("[Heatmap Debug] Sample aggregated bucket keys:", Array.from(buckets.keys()).slice(0, 8));
+      console.log("[Heatmap Debug] Sample normalized statuses:", normalizedStatusSamples);
+    }
+
     const data = services.flatMap((service) => rangeBuckets.map((bucket) => {
-      const row = buckets.get(`${service.serviceKey}:${bucket.label}`);
+      const row = buckets.get(`${service.serviceKey}:${bucket.key}`);
       let status: HeatmapStatus = "no_data";
       if (row?.criticalChecks) status = "critical";
       else if (row?.cannotVerifyChecks) status = "cannot_verify";
@@ -954,7 +1003,8 @@ export async function getInfrastructureIncidents(inputRange: unknown = "30d") {
           supportEmail: row.SUPPORT_EMAIL || "",
           escalationNote: row.ESCALATION_NOTE || ""
         };
-      });
+      })
+      .slice(0, 100);
 
     return { data };
   } finally {

@@ -16,7 +16,7 @@ export function DonutChart({ title, data, formatter }: DonutChartProps) {
     <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
       <h2 className="text-base font-semibold text-slate-950">{title}</h2>
       <div className="mt-4 h-72 w-full">
-        <ResponsiveContainer width="100%" height="100%">
+        <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 320, height: 288 }}>
           {data.length ? (
             <PieChart>
               <Pie

@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { Download, Edit3, Plus, Printer, QrCode, Search, Trash2, X } from "lucide-react";
 import { QRCodeCanvas } from "qrcode.react";
 import { api } from "@/lib/api";
+import { getAppBaseUrl } from "@/lib/apiBase";
 import { getSessionUser } from "@/lib/auth";
 import type { UserRole } from "@/types/auth";
 import { StatusBadge } from "@/components/tickets/StatusBadge";
@@ -478,8 +479,7 @@ function warrantyState(value?: string) {
 }
 
 function assetQrPayload(asset: Asset) {
-  const appUrl = (process.env.NEXT_PUBLIC_APP_URL || "http://10.5.5.178:3000").replace(/\/$/, "");
-  return `${appUrl}/asset/${encodeURIComponent(asset.assetTag)}`;
+  return `${getAppBaseUrl()}/asset/${encodeURIComponent(asset.assetTag)}`;
 }
 
 function qrCanvasId(asset: Asset, surface: QrSurface) {

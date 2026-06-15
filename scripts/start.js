@@ -93,7 +93,7 @@ async function main() {
         command: "npm run start --workspace @opscenter/frontend",
         name: "frontend",
         prefixColor: "cyan",
-        env: { PORT: String(frontendPort), NEXT_PUBLIC_API_URL: apiUrl }
+        env: { PORT: String(frontendPort), NEXT_PUBLIC_API_URL: apiUrl, NEXT_PUBLIC_APP_URL: frontendUrl }
       }
     ],
     {

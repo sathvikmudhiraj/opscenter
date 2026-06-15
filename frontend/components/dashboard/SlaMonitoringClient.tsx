@@ -115,7 +115,7 @@ export function SlaMonitoringClient() {
         <h2 className="text-base font-semibold text-slate-950">SLA Trend - Last 7 Days</h2>
         <div className="mt-4 h-72">
           {report.trend.length ? (
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 640, height: 288 }}>
               <LineChart data={report.trend}>
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="label" />
